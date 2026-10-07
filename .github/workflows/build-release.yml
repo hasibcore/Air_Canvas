@@ -56,15 +56,18 @@ jobs:
 
       - name: Generate Android Project scaffolding
         run: |
-          mkdir -p /tmp/backup_manifest
-          if [ -f android/app/src/main/AndroidManifest.xml ]; then
-            cp android/app/src/main/AndroidManifest.xml /tmp/backup_manifest/AndroidManifest.xml
-          fi
           rm -rf android
           flutter create . --platforms=android --org com.aircanvas.tablet
-          if [ -f /tmp/backup_manifest/AndroidManifest.xml ]; then
-            cp /tmp/backup_manifest/AndroidManifest.xml android/app/src/main/AndroidManifest.xml
-          fi
+          # Safely inject network and multicast permissions into generated AndroidManifest
+          python3 -c "
+          p = 'android/app/src/main/AndroidManifest.xml'
+          with open(p, 'r') as f: content = f.read()
+          perms = '''    <uses-permission android:name=\"android.permission.INTERNET\" />\n    <uses-permission android:name=\"android.permission.ACCESS_NETWORK_STATE\" />\n    <uses-permission android:name=\"android.permission.ACCESS_WIFI_STATE\" />\n    <uses-permission android:name=\"android.permission.CHANGE_WIFI_MULTICAST_STATE\" />\n    <uses-permission android:name=\"android.permission.NEARBY_WIFI_DEVICES\" android:usesPermissionFlags=\"neverForLocation\" />\n'''
+          if 'android.permission.INTERNET' not in content:
+              content = content.replace('<application', perms + '    <application')
+              with open(p, 'w') as f: f.write(content)
+          print('Updated AndroidManifest with network permissions successfully.')
+          "
 
       - name: Install dependencies
         run: flutter pub get
