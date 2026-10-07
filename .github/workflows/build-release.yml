@@ -1,0 +1,98 @@
+name: Build and Release AirCanvas
+
+on:
+  push:
+    tags:
+      - 'v*'
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    name: Build Windows Release (.exe)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Compile Native Windows Server Executable
+        shell: cmd
+        run: |
+          C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe /target:winexe /win32manifest:app.manifest /out:AirCanvas.exe /optimize+ /r:System.Drawing.dll /r:System.Windows.Forms.dll /r:System.dll AirCanvasServer.cs
+
+      - name: Compress Windows Release Bundle
+        shell: pwsh
+        run: |
+          Compress-Archive -Path AirCanvas.exe, Fix_Firewall.bat -DestinationPath AirCanvas-Windows-x64.zip
+
+      - name: Upload Windows Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AirCanvas-Windows-x64
+          path: AirCanvas-Windows-x64.zip
+
+  build-android:
+    name: Build Android APK (.apk)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          cache: true
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Build Android Release APK
+        run: flutter build apk --release
+
+      - name: Copy and rename APK
+        run: |
+          cp build/app/outputs/flutter-apk/app-release.apk AirCanvas-release.apk
+
+      - name: Upload Android Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AirCanvas-release.apk
+          path: AirCanvas-release.apk
+
+  release:
+    name: Create GitHub Release
+    needs: [build-windows, build-android]
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Publish Release with Binaries
+        uses: softprops/action-gh-release@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          tag_name: ${{ github.ref_name }}
+          name: AirCanvas ${{ github.ref_name }} - Fixed Wireless Graphics Tablet
+          files: |
+            release-assets/*
+          draft: false
+          prerelease: false
+          generate_release_notes: true
