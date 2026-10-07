@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import {
-  Github,
+  FolderGit2,
   GitBranch,
   Tag,
   Download,
@@ -52,7 +52,7 @@ git push origin v1.7.1`;
         <div className="p-6 border-b border-slate-800 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="w-12 h-12 rounded-2xl bg-white/10 text-white flex items-center justify-center border border-white/20">
-              <Github className="w-6 h-6" />
+              <FolderGit2 className="w-6 h-6" />
             </div>
             <div>
               <div className="flex items-center gap-2">
