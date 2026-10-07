@@ -23,12 +23,14 @@ import {
   Cable,
   Copy,
   Check,
+  Github,
 } from 'lucide-react';
 import { ConnectionManager } from '../../services/connectionManager.ts';
 import { DrawingEngine } from '../../services/drawingEngine.ts';
 import { DrawingCanvas } from '../canvas/DrawingCanvas.tsx';
 import { QRCodeCard } from './QRCodeCard.tsx';
 import { QRScannerModal } from './QRScannerModal.tsx';
+import { GitHubReleaseModal } from './GitHubReleaseModal.tsx';
 import { DpiDiagnosticModal } from '../drawing/DpiDiagnosticModal.tsx';
 import { LicenseService } from '../../services/licenseService.ts';
 import { Crown, Zap, ShieldCheck, Database } from 'lucide-react';
@@ -60,6 +62,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
   const [showManualModal, setShowManualModal] = useState(false);
   const [showScannerModal, setShowScannerModal] = useState(false);
   const [showDpiModal, setShowDpiModal] = useState(false);
+  const [showGitHubModal, setShowGitHubModal] = useState(false);
 
   // Manual connect state
   const [manualIp, setManualIp] = useState('192.168.1.105');
@@ -192,6 +195,16 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
               <span>Dual-Device Bridge</span>
             </button>
           )}
+
+          <button
+            type="button"
+            onClick={() => setShowGitHubModal(true)}
+            className="px-3 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-200 hover:text-white transition-all flex items-center gap-1.5 text-xs font-semibold shadow-sm"
+            title="GitHub Release & Push Commands (v1.7.1)"
+          >
+            <Github className="w-4 h-4 text-purple-400" />
+            <span className="hidden sm:inline">GitHub Release</span>
+          </button>
 
           <button
             type="button"
@@ -1130,6 +1143,12 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
         connection={connection}
         isOpen={showDpiModal}
         onClose={() => setShowDpiModal(false)}
+      />
+
+      {/* GitHub Push & Release Modal */}
+      <GitHubReleaseModal
+        isOpen={showGitHubModal}
+        onClose={() => setShowGitHubModal(false)}
       />
     </div>
   );
