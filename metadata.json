@@ -1,0 +1,8 @@
+{
+  "name": "Air Canvas",
+  "description": "High-precision wireless graphics tablet & digital drawing studio turning mobile and tablet devices into real-time drawing surfaces with 1-Euro adaptive jitter filtering, calibrated pressure curves, and low latency.",
+  "version": "1.7.1",
+  "capabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
