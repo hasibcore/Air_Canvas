@@ -54,6 +54,18 @@ jobs:
           channel: 'stable'
           cache: true
 
+      - name: Generate Android Project scaffolding
+        run: |
+          mkdir -p /tmp/backup_manifest
+          if [ -f android/app/src/main/AndroidManifest.xml ]; then
+            cp android/app/src/main/AndroidManifest.xml /tmp/backup_manifest/AndroidManifest.xml
+          fi
+          rm -rf android
+          flutter create . --platforms=android --org com.aircanvas.tablet
+          if [ -f /tmp/backup_manifest/AndroidManifest.xml ]; then
+            cp /tmp/backup_manifest/AndroidManifest.xml android/app/src/main/AndroidManifest.xml
+          fi
+
       - name: Install dependencies
         run: flutter pub get
 
@@ -62,7 +74,11 @@ jobs:
 
       - name: Copy and rename APK
         run: |
-          cp build/app/outputs/flutter-apk/app-release.apk AirCanvas-release.apk
+          if [ -f build/app/outputs/flutter-apk/app-release.apk ]; then
+            cp build/app/outputs/flutter-apk/app-release.apk AirCanvas-release.apk
+          else
+            find build/ -name "*.apk" -exec cp {} AirCanvas-release.apk \;
+          fi
 
       - name: Upload Android Artifact
         uses: actions/upload-artifact@v4
@@ -73,7 +89,7 @@ jobs:
   release:
     name: Create GitHub Release
     needs: [build-windows, build-android]
-    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    if: always() && (needs.build-windows.result == 'success' || needs.build-android.result == 'success')
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -89,8 +105,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          tag_name: ${{ github.ref_name }}
-          name: AirCanvas ${{ github.ref_name }} - Fixed Wireless Graphics Tablet
+          tag_name: ${{ (github.ref_type == 'tag' && github.ref_name) || 'v1.7.1' }}
+          name: AirCanvas ${{ (github.ref_type == 'tag' && github.ref_name) || 'v1.7.1' }} - Wireless Graphics Tablet
           files: |
             release-assets/*
           draft: false

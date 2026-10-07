@@ -17,6 +17,18 @@ using System.Threading;
 
 namespace AirCanvas.Server
 {
+    public class ScreenBounds
+    {
+        public int Left;
+        public int Top;
+        public int Width;
+        public int Height;
+        public int VirtualLeft;
+        public int VirtualTop;
+        public int VirtualWidth;
+        public int VirtualHeight;
+    }
+
     public class AirCanvasServer
     {
         public const string VERSION = "1.7.1 PRO";
