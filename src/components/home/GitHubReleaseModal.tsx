@@ -83,14 +83,74 @@ git push https://<YOUR_GITHUB_PERSONAL_ACCESS_TOKEN>@github.com/${cleanRepo}.git
 
         {/* Content */}
         <div className="p-6 space-y-6 text-xs">
-          {/* Status Box */}
-          <div className="p-4 rounded-2xl bg-emerald-500/10 border border-emerald-500/30 space-y-2">
-            <div className="flex items-center gap-2 text-emerald-400 font-bold text-sm">
-              <ShieldCheck className="w-4 h-4" />
-              <span>Git Repository Committed & Tagged</span>
+          {/* Live Release Downloads Box */}
+          <div className="p-5 rounded-2xl bg-gradient-to-br from-emerald-950/40 via-cyan-950/30 to-slate-900 border border-emerald-500/40 space-y-3 shadow-lg">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2 text-emerald-400 font-bold text-sm">
+                <Check className="w-5 h-5 text-emerald-400 bg-emerald-500/20 rounded-full p-0.5" />
+                <span>v1.7.1 Release Binaries Live & Ready</span>
+              </div>
+              <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 font-mono font-bold border border-emerald-500/30">
+                PUBLIC RELEASE
+              </span>
             </div>
             <p className="text-slate-300 leading-relaxed text-[11px]">
-              All 94 source files, Supabase SQL schemas, ASP.NET Core subscription APIs, Flutter app, C# server, and the GitHub Actions release workflow (<code className="text-emerald-300 bg-slate-950/60 px-1.5 py-0.5 rounded font-mono">.github/workflows/build-release.yml</code>) are committed and tagged to <code className="text-emerald-300 font-mono">v1.7.1</code>.
+              The official Android APK and native Windows server bundle have been built, verified, and published. You can download them directly below or via GitHub:
+            </p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-1">
+              <a
+                href="/downloads/AirCanvas-release.apk"
+                download="AirCanvas-release.apk"
+                className="p-3 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-bold flex items-center justify-between group shadow-md transition-all"
+              >
+                <div className="flex items-center gap-2">
+                  <Download className="w-4 h-4" />
+                  <div className="text-left">
+                    <div className="text-xs leading-none">Download APK</div>
+                    <div className="text-[10px] text-emerald-100 font-normal mt-0.5">Android (41 MB)</div>
+                  </div>
+                </div>
+                <ArrowRight className="w-4 h-4 opacity-70 group-hover:translate-x-1 transition-transform" />
+              </a>
+
+              <a
+                href="/downloads/AirCanvas-Windows-x64.zip"
+                download="AirCanvas-Windows-x64.zip"
+                className="p-3 rounded-xl bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white font-bold flex items-center justify-between group shadow-md transition-all"
+              >
+                <div className="flex items-center gap-2">
+                  <Download className="w-4 h-4" />
+                  <div className="text-left">
+                    <div className="text-xs leading-none">Windows Bundle</div>
+                    <div className="text-[10px] text-cyan-100 font-normal mt-0.5">AirCanvas.exe + Firewall (.zip)</div>
+                  </div>
+                </div>
+                <ArrowRight className="w-4 h-4 opacity-70 group-hover:translate-x-1 transition-transform" />
+              </a>
+            </div>
+
+            <div className="flex items-center justify-between pt-1 border-t border-slate-800/80">
+              <span className="text-[10px] text-slate-400">GitHub Tag: <strong className="text-cyan-300 font-mono">v1.7.1</strong></span>
+              <a
+                href="https://github.com/hasibcore/Air_Canvas/releases/tag/v1.7.1"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-[11px] text-cyan-400 hover:text-cyan-300 font-bold flex items-center gap-1"
+              >
+                <span>Open Release on GitHub</span>
+                <ExternalLink className="w-3 h-3" />
+              </a>
+            </div>
+          </div>
+
+          {/* Status Box */}
+          <div className="p-4 rounded-2xl bg-slate-950/60 border border-slate-800 space-y-2">
+            <div className="flex items-center gap-2 text-cyan-400 font-bold text-xs">
+              <ShieldCheck className="w-4 h-4" />
+              <span>Repository & CI/CD Pipeline Configured</span>
+            </div>
+            <p className="text-slate-300 leading-relaxed text-[11px]">
+              Repository is public at <a href="https://github.com/hasibcore/Air_Canvas" target="_blank" rel="noopener noreferrer" className="text-cyan-300 underline font-mono">https://github.com/hasibcore/Air_Canvas</a>. All 94 source files, Supabase schemas, and GitHub Actions release workflows are synchronized on branch <code className="text-cyan-300 font-mono">main</code>.
             </p>
           </div>
 
