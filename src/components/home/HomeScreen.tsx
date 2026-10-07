@@ -156,7 +156,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
             <div className="flex items-center gap-2">
               <h1 className="text-2xl font-black tracking-tight text-white font-sans">Air Canvas</h1>
               <span className="text-[10px] px-2 py-0.5 rounded-full bg-cyan-500/15 text-cyan-300 border border-cyan-500/30 font-bold">
-                v1.7.1 PRO
+                v1.7.2 PRO
               </span>
             </div>
             <p className="text-xs text-slate-400 font-medium">Wireless Graphics Tablet & Digital Drawing Studio</p>

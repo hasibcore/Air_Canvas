@@ -72,13 +72,41 @@ jobs:
       - name: Build Android Release APK
         run: flutter build apk --release
 
-      - name: Copy and rename APK
+      - name: Align and Sign APK with v1, v2, and v3 Signature Schemes
         run: |
-          if [ -f build/app/outputs/flutter-apk/app-release.apk ]; then
-            cp build/app/outputs/flutter-apk/app-release.apk AirCanvas-release.apk
-          else
-            find build/ -name "*.apk" -exec cp {} AirCanvas-release.apk \;
+          BUILD_TOOLS=$(find $ANDROID_HOME/build-tools -name apksigner -exec dirname {} \; | sort -V | tail -n 1)
+          echo "Found Android Build Tools at: $BUILD_TOOLS"
+
+          TARGET_APK="build/app/outputs/flutter-apk/app-release.apk"
+          if [ ! -f "$TARGET_APK" ]; then
+            TARGET_APK=$(find build/ -name "*release*.apk" | head -n 1)
           fi
+          echo "Source APK: $TARGET_APK"
+
+          # 1. Create a 2048-bit RSA Keystore valid for 25 years
+          keytool -genkeypair -v -keystore aircanvas-release.keystore \
+            -alias aircanvas \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass aircanvas123 -keypass aircanvas123 \
+            -dname "CN=AirCanvas, OU=Mobile, O=AirCanvas, L=Dhaka, ST=Dhaka, C=BD"
+
+          # 2. 4-byte zipalign
+          $BUILD_TOOLS/zipalign -f -p 4 "$TARGET_APK" AirCanvas-aligned.apk
+
+          # 3. Sign with v1 (JAR signing) + v2 + v3 schemes
+          $BUILD_TOOLS/apksigner sign --ks aircanvas-release.keystore \
+            --ks-pass pass:aircanvas123 \
+            --ks-key-alias aircanvas \
+            --key-pass pass:aircanvas123 \
+            --v1-signing-enabled true \
+            --v2-signing-enabled true \
+            --v3-signing-enabled true \
+            --out AirCanvas-release.apk \
+            AirCanvas-aligned.apk
+
+          # 4. Rigorously verify signature
+          echo "=== Verifying APK Signature Schemes ==="
+          $BUILD_TOOLS/apksigner verify --verbose AirCanvas-release.apk
 
       - name: Upload Android Artifact
         uses: actions/upload-artifact@v4
@@ -105,8 +133,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          tag_name: ${{ (github.ref_type == 'tag' && github.ref_name) || 'v1.7.1' }}
-          name: AirCanvas ${{ (github.ref_type == 'tag' && github.ref_name) || 'v1.7.1' }} - Wireless Graphics Tablet
+          tag_name: ${{ (github.ref_type == 'tag' && github.ref_name) || 'v1.7.2' }}
+          name: AirCanvas ${{ (github.ref_type == 'tag' && github.ref_name) || 'v1.7.2' }} - Wireless Graphics Tablet
           files: |
             release-assets/*
           draft: false
