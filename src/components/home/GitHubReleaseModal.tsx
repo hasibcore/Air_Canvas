@@ -21,9 +21,9 @@ interface GitHubReleaseModalProps {
 }
 
 export const GitHubReleaseModal: React.FC<GitHubReleaseModalProps> = ({ isOpen, onClose }) => {
-  const [repoUrl, setRepoUrl] = useState('');
+  const [repoUrl, setRepoUrl] = useState('https://github.com/hasibcore/Air_Canvas');
+  const [patToken, setPatToken] = useState('');
   const [copiedCmd, setCopiedCmd] = useState<string | null>(null);
-  const [statusMessage, setStatusMessage] = useState<string | null>(null);
 
   if (!isOpen) return null;
 
@@ -38,12 +38,18 @@ export const GitHubReleaseModal: React.FC<GitHubReleaseModalProps> = ({ isOpen, 
     }
   };
 
-  const cleanRepo = repoUrl.trim().replace(/^https?:\/\/github\.com\//, '').replace(/\.git$/, '');
-  const targetRemote = cleanRepo ? `https://github.com/${cleanRepo}.git` : 'https://github.com/<your-username>/aircanvas.git';
+  const cleanRepo = repoUrl.trim().replace(/^https?:\/\/github\.com\//, '').replace(/\.git$/, '') || 'hasibcore/Air_Canvas';
+  const targetRemote = `https://github.com/${cleanRepo}.git`;
 
-  const pushCommand = `git remote add origin ${targetRemote}
+  const pushCommand = `git remote set-url origin ${targetRemote}
 git push -u origin main
 git push origin v1.7.1`;
+
+  const tokenPushCommand = patToken.trim()
+    ? `git push https://${patToken.trim()}@github.com/${cleanRepo}.git main
+git push https://${patToken.trim()}@github.com/${cleanRepo}.git v1.7.1`
+    : `git push https://<YOUR_GITHUB_PERSONAL_ACCESS_TOKEN>@github.com/${cleanRepo}.git main
+git push https://<YOUR_GITHUB_PERSONAL_ACCESS_TOKEN>@github.com/${cleanRepo}.git v1.7.1`;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm animate-in fade-in duration-200">
@@ -90,29 +96,40 @@ git push origin v1.7.1`;
 
           {/* Repository Target Input */}
           <div className="space-y-2">
-            <label className="block font-semibold text-slate-200">
-              Your GitHub Repository URL or Name:
-            </label>
+            <div className="flex items-center justify-between">
+              <label className="block font-semibold text-slate-200">
+                Target GitHub Repository:
+              </label>
+              <a
+                href={`https://github.com/${cleanRepo}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-cyan-400 hover:text-cyan-300 font-bold flex items-center gap-1 text-[11px]"
+              >
+                <span>Open on GitHub</span>
+                <ExternalLink className="w-3 h-3" />
+              </a>
+            </div>
             <div className="flex gap-2">
               <input
                 type="text"
                 value={repoUrl}
                 onChange={(e) => setRepoUrl(e.target.value)}
-                placeholder="e.g. your-username/aircanvas or https://github.com/..."
+                placeholder="https://github.com/hasibcore/Air_Canvas"
                 className="flex-1 bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-cyan-500 font-mono"
               />
             </div>
             <p className="text-[11px] text-slate-400">
-              Paste your personal or organization GitHub repository URL to generate the instant push command.
+              Current remote is set to <code className="text-cyan-300 font-mono">https://github.com/{cleanRepo}.git</code>. Make sure the repository exists under your GitHub account.
             </p>
           </div>
 
-          {/* Quick Push Instructions */}
+          {/* Quick Push Instructions - Standard Terminal */}
           <div className="space-y-2">
             <div className="flex items-center justify-between">
               <span className="font-semibold text-slate-200 flex items-center gap-1.5">
                 <Terminal className="w-3.5 h-3.5 text-cyan-400" />
-                Push & Publish Command
+                Method 1: Push via Standard Git (Terminal / Git Credential Manager)
               </span>
               <button
                 type="button"
@@ -127,7 +144,7 @@ git push origin v1.7.1`;
                 ) : (
                   <>
                     <Copy className="w-3.5 h-3.5" />
-                    <span>Copy All</span>
+                    <span>Copy Commands</span>
                   </>
                 )}
               </button>
@@ -135,6 +152,46 @@ git push origin v1.7.1`;
 
             <div className="bg-slate-950 border border-slate-800 rounded-2xl p-4 font-mono text-[11px] text-cyan-300 relative group overflow-x-auto">
               <pre className="whitespace-pre-wrap">{pushCommand}</pre>
+            </div>
+          </div>
+
+          {/* Method 2 - Personal Access Token */}
+          <div className="space-y-2 p-4 rounded-2xl bg-purple-950/20 border border-purple-500/20">
+            <div className="flex items-center justify-between">
+              <span className="font-semibold text-purple-300 flex items-center gap-1.5">
+                <Tag className="w-3.5 h-3.5 text-purple-400" />
+                Method 2: One-Step Push with GitHub Personal Access Token (PAT)
+              </span>
+              <button
+                type="button"
+                onClick={() => copyToClipboard(tokenPushCommand, 'token-push')}
+                className="flex items-center gap-1 text-purple-400 hover:text-purple-300 font-bold"
+              >
+                {copiedCmd === 'token-push' ? (
+                  <>
+                    <Check className="w-3.5 h-3.5 text-emerald-400" />
+                    <span className="text-emerald-400">Copied!</span>
+                  </>
+                ) : (
+                  <>
+                    <Copy className="w-3.5 h-3.5" />
+                    <span>Copy Token Command</span>
+                  </>
+                )}
+              </button>
+            </div>
+            <p className="text-[11px] text-slate-400">
+              If your terminal prompts for password or lacks interactive OAuth, paste your token (<code className="text-purple-300">ghp_...</code>) below to generate the authenticated push command:
+            </p>
+            <input
+              type="password"
+              value={patToken}
+              onChange={(e) => setPatToken(e.target.value)}
+              placeholder="Paste GitHub Personal Access Token (e.g. ghp_...)"
+              className="w-full bg-slate-950 border border-purple-500/30 rounded-xl px-4 py-2 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-purple-400 font-mono"
+            />
+            <div className="bg-slate-950/80 border border-purple-900/40 rounded-xl p-3 font-mono text-[10px] text-purple-300 overflow-x-auto">
+              <pre className="whitespace-pre-wrap">{tokenPushCommand}</pre>
             </div>
           </div>
 
@@ -184,17 +241,30 @@ git push origin v1.7.1`;
         </div>
 
         {/* Footer */}
-        <div className="p-5 border-t border-slate-800 bg-slate-900/50 flex items-center justify-between">
-          <span className="text-[11px] text-slate-400">
-            Git Tag: <strong className="text-cyan-300 font-mono">v1.7.1</strong> • Branch: <strong className="text-white font-mono">main</strong>
-          </span>
-          <button
-            type="button"
-            onClick={onClose}
-            className="px-5 py-2 bg-purple-600 hover:bg-purple-500 text-white font-bold text-xs rounded-xl shadow-md transition-all"
-          >
-            Done
-          </button>
+        <div className="p-5 border-t border-slate-800 bg-slate-900/50 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <span className="text-[11px] text-slate-400">
+              Git Tag: <strong className="text-cyan-300 font-mono">v1.7.1</strong> • Branch: <strong className="text-white font-mono">main</strong>
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            <a
+              href={`https://github.com/${cleanRepo}/releases`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 hover:text-white rounded-xl font-bold text-xs flex items-center gap-1.5 transition-colors border border-slate-700"
+            >
+              <span>Releases Page</span>
+              <ExternalLink className="w-3.5 h-3.5" />
+            </a>
+            <button
+              type="button"
+              onClick={onClose}
+              className="px-5 py-2 bg-purple-600 hover:bg-purple-500 text-white font-bold text-xs rounded-xl shadow-md transition-all"
+            >
+              Done
+            </button>
+          </div>
         </div>
       </div>
     </div>
