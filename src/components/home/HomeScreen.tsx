@@ -31,6 +31,7 @@ import { DrawingCanvas } from '../canvas/DrawingCanvas.tsx';
 import { QRCodeCard } from './QRCodeCard.tsx';
 import { QRScannerModal } from './QRScannerModal.tsx';
 import { GitHubReleaseModal } from './GitHubReleaseModal.tsx';
+import { InstallApkModal } from './InstallApkModal.tsx';
 import { DpiDiagnosticModal } from '../drawing/DpiDiagnosticModal.tsx';
 import { LicenseService } from '../../services/licenseService.ts';
 import { Crown, Zap, ShieldCheck, Database } from 'lucide-react';
@@ -63,6 +64,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
   const [showScannerModal, setShowScannerModal] = useState(false);
   const [showDpiModal, setShowDpiModal] = useState(false);
   const [showGitHubModal, setShowGitHubModal] = useState(false);
+  const [showInstallApkModal, setShowInstallApkModal] = useState(false);
 
   // Manual connect state
   const [manualIp, setManualIp] = useState('192.168.1.105');
@@ -195,6 +197,16 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
               <span>Dual-Device Bridge</span>
             </button>
           )}
+
+          <button
+            type="button"
+            onClick={() => setShowInstallApkModal(true)}
+            className="px-3.5 py-1.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white transition-all flex items-center gap-1.5 text-xs font-bold shadow-[0_0_15px_rgba(16,185,129,0.3)] animate-pulse"
+            title="Download & Install Mobile APK (Scan QR or Direct Download)"
+          >
+            <Smartphone className="w-4 h-4" />
+            <span>Install APK</span>
+          </button>
 
           <button
             type="button"
@@ -1149,6 +1161,12 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
       <GitHubReleaseModal
         isOpen={showGitHubModal}
         onClose={() => setShowGitHubModal(false)}
+      />
+
+      {/* Direct Mobile APK Installation Modal */}
+      <InstallApkModal
+        isOpen={showInstallApkModal}
+        onClose={() => setShowInstallApkModal(false)}
       />
     </div>
   );
