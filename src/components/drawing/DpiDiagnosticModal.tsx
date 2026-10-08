@@ -29,6 +29,7 @@ export const DpiDiagnosticModal: React.FC<DpiDiagnosticModalProps> = ({
   isOpen,
   onClose,
 }) => {
+  const [showLegacyComparison, setShowLegacyComparison] = useState(false);
   const [testNormX, setTestNormX] = useState(0.5);
   const [testNormY, setTestNormY] = useState(0.5);
   const [dpiScale, setDpiScale] = useState(150); // Default to 150% (the laptop setting in the bug report)
@@ -225,29 +226,51 @@ export const DpiDiagnosticModal: React.FC<DpiDiagnosticModalProps> = ({
                 <div className="w-1.5 h-1.5 rounded-full bg-white" />
               </div>
 
-              {/* Buggy legacy phantom marker for demonstration if 150% DPI */}
-              {dpiScale > 100 && isExactCenter && (
+              {/* Optional legacy comparison marker (disabled by default to avoid confusion) */}
+              {showLegacyComparison && dpiScale > 100 && (
                 <div
-                  className="absolute w-4 h-4 -translate-x-1/2 -translate-y-1/2 rounded-full border border-dashed border-rose-500/70 bg-rose-500/20 pointer-events-none flex items-center justify-center opacity-70"
+                  className="absolute w-5 h-5 -translate-x-1/2 -translate-y-1/2 rounded-full border border-dashed border-amber-500/80 bg-amber-500/20 pointer-events-none flex items-center justify-center transition-all animate-pulse"
                   style={{
-                    left: `${Math.min(98, (0.5 * (dpiScale / 100)) * 100)}%`,
-                    top: `${Math.min(98, (0.5 * (dpiScale / 100)) * 100)}%`,
+                    left: `${Math.min(98, (testNormX * (dpiScale / 100)) * 100)}%`,
+                    top: `${Math.min(98, (testNormY * (dpiScale / 100)) * 100)}%`,
                   }}
-                  title="Where the cursor landed prior to PerMonitorV2 fix"
+                  title="Where legacy unscaled cursor would land without PerMonitorV2"
                 >
-                  <span className="text-[7px] text-rose-300 font-bold">BUG</span>
+                  <span className="text-[8px] text-amber-300 font-bold">OLD</span>
                 </div>
               )}
 
               <div className="absolute top-2 right-2 px-2 py-0.5 rounded bg-black/60 backdrop-blur-sm text-[10px] font-mono text-slate-300">
                 {screenWidth}x{screenHeight} @ {dpiScale}% DPI
               </div>
+
+              {/* Legend overlay if comparison enabled */}
+              {showLegacyComparison && (
+                <div className="absolute bottom-2 left-2 px-2 py-1 rounded-lg bg-black/80 backdrop-blur-sm text-[9px] font-mono text-slate-300 flex items-center gap-2 border border-slate-700/60">
+                  <span className="flex items-center gap-1 text-emerald-400 font-bold">
+                    <span className="w-2 h-2 rounded-full bg-emerald-400 inline-block" /> Fixed (Current)
+                  </span>
+                  <span className="flex items-center gap-1 text-amber-400">
+                    <span className="w-2 h-2 rounded-full border border-dashed border-amber-400 inline-block" /> Legacy (Old)
+                  </span>
+                </div>
+              )}
             </div>
 
-            {/* DPI Scale Factor Selector */}
-            <div className="flex items-center justify-between gap-2 text-xs">
-              <span className="text-[11px] text-slate-400 font-semibold">Windows DPI Scale:</span>
-              <div className="flex gap-1">
+            {/* DPI Scale Factor Selector & Legacy Compare Toggle */}
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
+              <label className="flex items-center gap-1.5 cursor-pointer text-[11px] text-slate-400 hover:text-slate-200 select-none">
+                <input
+                  type="checkbox"
+                  checked={showLegacyComparison}
+                  onChange={(e) => setShowLegacyComparison(e.target.checked)}
+                  className="rounded border-slate-700 bg-slate-800 text-cyan-500 focus:ring-0 w-3.5 h-3.5"
+                />
+                <span>Compare with pre-fix legacy drift</span>
+              </label>
+
+              <div className="flex items-center gap-1 self-end sm:self-auto">
+                <span className="text-[10px] text-slate-400 font-semibold mr-1">DPI Scale:</span>
                 {[100, 125, 150, 175, 200].map((scale) => (
                   <button
                     key={scale}
