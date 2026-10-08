@@ -66,33 +66,16 @@ jobs:
             -storepass aircanvas123 -keypass aircanvas123 \
             -dname "CN=AirCanvas, OU=Mobile, O=AirCanvas, L=Dhaka, ST=Dhaka, C=BD"
 
-          # 2. Configure android/app/build.gradle with minSdkVersion 24 and release signing config
+          # 2. Configure build.gradle.kts / build.gradle with minSdk 24 for universal Android compatibility
           python3 -c "
-          p = 'android/app/build.gradle'
-          with open(p, 'r') as f: content = f.read()
-
-          # Set minSdkVersion to 24 for universal modern Android compatibility
-          content = content.replace('minSdkVersion flutter.minSdkVersion', 'minSdkVersion 24')
-
-          # Add release signingConfig
-          signing_block = '''
-          signingConfigs {
-              release {
-                  storeFile file('release.keystore')
-                  storePassword 'aircanvas123'
-                  keyAlias 'aircanvas'
-                  keyPassword 'aircanvas123'
-                  v1SigningEnabled true
-                  v2SigningEnabled true
-              }
-          }
-          '''
-          if 'signingConfigs {' not in content:
-              content = content.replace('buildTypes {', signing_block + '\n    buildTypes {')
-          content = content.replace('signingConfig = signingConfigs.debug', 'signingConfig = signingConfigs.release')
-
-          with open(p, 'w') as f: f.write(content)
-          print('Configured android/app/build.gradle with release keystore and v1/v2 signing.')
+          import os
+          for path in ['android/app/build.gradle.kts', 'android/app/build.gradle']:
+              if os.path.exists(path):
+                  with open(path, 'r') as f: content = f.read()
+                  content = content.replace('minSdk = flutter.minSdkVersion', 'minSdk = 24')
+                  content = content.replace('minSdkVersion flutter.minSdkVersion', 'minSdkVersion 24')
+                  with open(path, 'w') as f: f.write(content)
+                  print(f'Configured {path} with minSdk 24.')
           "
 
           # 3. Safely inject network and multicast permissions into generated AndroidManifest
