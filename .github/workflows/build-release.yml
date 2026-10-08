@@ -58,7 +58,44 @@ jobs:
         run: |
           rm -rf android
           flutter create . --platforms=android --org com.aircanvas.tablet
-          # Safely inject network and multicast permissions into generated AndroidManifest
+
+          # 1. Generate standard valid 2048-bit release keystore valid for 25 years
+          keytool -genkeypair -v -keystore android/app/release.keystore \
+            -alias aircanvas \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass aircanvas123 -keypass aircanvas123 \
+            -dname "CN=AirCanvas, OU=Mobile, O=AirCanvas, L=Dhaka, ST=Dhaka, C=BD"
+
+          # 2. Configure android/app/build.gradle with minSdkVersion 24 and release signing config
+          python3 -c "
+          p = 'android/app/build.gradle'
+          with open(p, 'r') as f: content = f.read()
+
+          # Set minSdkVersion to 24 for universal modern Android compatibility
+          content = content.replace('minSdkVersion flutter.minSdkVersion', 'minSdkVersion 24')
+
+          # Add release signingConfig
+          signing_block = '''
+          signingConfigs {
+              release {
+                  storeFile file('release.keystore')
+                  storePassword 'aircanvas123'
+                  keyAlias 'aircanvas'
+                  keyPassword 'aircanvas123'
+                  v1SigningEnabled true
+                  v2SigningEnabled true
+              }
+          }
+          '''
+          if 'signingConfigs {' not in content:
+              content = content.replace('buildTypes {', signing_block + '\n    buildTypes {')
+          content = content.replace('signingConfig = signingConfigs.debug', 'signingConfig = signingConfigs.release')
+
+          with open(p, 'w') as f: f.write(content)
+          print('Configured android/app/build.gradle with release keystore and v1/v2 signing.')
+          "
+
+          # 3. Safely inject network and multicast permissions into generated AndroidManifest
           python3 -c "
           p = 'android/app/src/main/AndroidManifest.xml'
           with open(p, 'r') as f: content = f.read()
@@ -86,18 +123,17 @@ jobs:
           fi
           echo "Source APK: $TARGET_APK"
 
-          # 1. Create a 2048-bit RSA Keystore valid for 25 years
-          keytool -genkeypair -v -keystore aircanvas-release.keystore \
-            -alias aircanvas \
-            -keyalg RSA -keysize 2048 -validity 10000 \
+          # Step 1: Sign with jarsigner to guarantee v1 JAR scheme presence (META-INF/*.SF, *.RSA)
+          jarsigner -verbose -sigalg SHA256withRSA -digestalg SHA-256 \
+            -keystore android/app/release.keystore \
             -storepass aircanvas123 -keypass aircanvas123 \
-            -dname "CN=AirCanvas, OU=Mobile, O=AirCanvas, L=Dhaka, ST=Dhaka, C=BD"
+            "$TARGET_APK" aircanvas
 
-          # 2. 4-byte zipalign
+          # Step 2: 4-byte zipalign
           $BUILD_TOOLS/zipalign -f -p 4 "$TARGET_APK" AirCanvas-aligned.apk
 
-          # 3. Sign with v1 (JAR signing) + v2 + v3 schemes
-          $BUILD_TOOLS/apksigner sign --ks aircanvas-release.keystore \
+          # Step 3: Sign with apksigner (v1 + v2 + v3 schemes)
+          $BUILD_TOOLS/apksigner sign --ks android/app/release.keystore \
             --ks-pass pass:aircanvas123 \
             --ks-key-alias aircanvas \
             --key-pass pass:aircanvas123 \
@@ -107,7 +143,7 @@ jobs:
             --out AirCanvas-release.apk \
             AirCanvas-aligned.apk
 
-          # 4. Rigorously verify signature
+          # Step 4: Verify full signature compatibility
           echo "=== Verifying APK Signature Schemes ==="
           $BUILD_TOOLS/apksigner verify --verbose AirCanvas-release.apk
 
@@ -136,8 +172,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          tag_name: ${{ (github.ref_type == 'tag' && github.ref_name) || 'v1.7.2' }}
-          name: AirCanvas ${{ (github.ref_type == 'tag' && github.ref_name) || 'v1.7.2' }} - Wireless Graphics Tablet
+          tag_name: ${{ (github.ref_type == 'tag' && github.ref_name) || 'v1.7.3' }}
+          name: AirCanvas ${{ (github.ref_type == 'tag' && github.ref_name) || 'v1.7.3' }} - Wireless Graphics Tablet
           files: |
             release-assets/*
           draft: false

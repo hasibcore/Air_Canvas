@@ -43,13 +43,13 @@ export const GitHubReleaseModal: React.FC<GitHubReleaseModalProps> = ({ isOpen, 
 
   const pushCommand = `git remote set-url origin ${targetRemote}
 git push -u origin main
-git push origin v1.7.2`;
+git push origin v1.7.3`;
 
   const tokenPushCommand = patToken.trim()
     ? `git push https://${patToken.trim()}@github.com/${cleanRepo}.git main
-git push https://${patToken.trim()}@github.com/${cleanRepo}.git v1.7.2`
+git push https://${patToken.trim()}@github.com/${cleanRepo}.git v1.7.3`
     : `git push https://<YOUR_GITHUB_PERSONAL_ACCESS_TOKEN>@github.com/${cleanRepo}.git main
-git push https://<YOUR_GITHUB_PERSONAL_ACCESS_TOKEN>@github.com/${cleanRepo}.git v1.7.2`;
+git push https://<YOUR_GITHUB_PERSONAL_ACCESS_TOKEN>@github.com/${cleanRepo}.git v1.7.3`;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm animate-in fade-in duration-200">
@@ -64,7 +64,7 @@ git push https://<YOUR_GITHUB_PERSONAL_ACCESS_TOKEN>@github.com/${cleanRepo}.git
               <div className="flex items-center gap-2">
                 <h3 className="text-lg font-bold text-white">GitHub Push & Release</h3>
                 <span className="px-2 py-0.5 rounded-full text-[10px] font-mono font-bold bg-cyan-500/20 text-cyan-300 border border-cyan-500/30">
-                  v1.7.2
+                  v1.7.3
                 </span>
               </div>
               <p className="text-xs text-slate-400 mt-0.5">
@@ -88,7 +88,7 @@ git push https://<YOUR_GITHUB_PERSONAL_ACCESS_TOKEN>@github.com/${cleanRepo}.git
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2 text-emerald-400 font-bold text-sm">
                 <Check className="w-5 h-5 text-emerald-400 bg-emerald-500/20 rounded-full p-0.5" />
-                <span>v1.7.2 Release Binaries Live & Ready</span>
+                <span>v1.7.3 Release Binaries Live & Ready</span>
               </div>
               <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 font-mono font-bold border border-emerald-500/30">
                 PUBLIC RELEASE
@@ -130,9 +130,9 @@ git push https://<YOUR_GITHUB_PERSONAL_ACCESS_TOKEN>@github.com/${cleanRepo}.git
             </div>
 
             <div className="flex items-center justify-between pt-1 border-t border-slate-800/80">
-              <span className="text-[10px] text-slate-400">GitHub Tag: <strong className="text-cyan-300 font-mono">v1.7.2</strong></span>
+              <span className="text-[10px] text-slate-400">GitHub Tag: <strong className="text-cyan-300 font-mono">v1.7.3</strong></span>
               <a
-                href="https://github.com/hasibcore/Air_Canvas/releases/tag/v1.7.2"
+                href="https://github.com/hasibcore/Air_Canvas/releases/tag/v1.7.3"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="text-[11px] text-cyan-400 hover:text-cyan-300 font-bold flex items-center gap-1"
