@@ -66,6 +66,7 @@ export class ConnectionManager {
 
   // Broadcast channel for multi-tab zero-lag coordination
   private bc: BroadcastChannel | null = null;
+  private ws: WebSocket | null = null;
   private pingInterval: number | null = null;
   private listeners: Set<() => void> = new Set();
 
@@ -255,7 +256,144 @@ export class ConnectionManager {
     this.mode = 'server';
     this.pairingPin = pin;
     this.state = 'discovering';
+
+    // Connect to WebSocket Relay as host
+    if (typeof window !== 'undefined') {
+      try {
+        if (this.ws) {
+          this.ws.close();
+          this.ws = null;
+        }
+        const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = `${proto}//${window.location.host}/ws?pin=${encodeURIComponent(pin)}&role=host`;
+        const socket = new WebSocket(wsUrl);
+        socket.binaryType = 'arraybuffer';
+        this.ws = socket;
+
+        socket.onopen = () => {
+          console.log(`[Web Relay] Connected as Host for PIN: ${pin}`);
+        };
+
+        socket.onmessage = (ev) => {
+          this.processIncomingSocketData(ev.data);
+        };
+      } catch (err) {
+        console.warn('WebSocket relay error', err);
+      }
+    }
+
     this.notify();
+  }
+
+  private processIncomingSocketData(raw: any): void {
+    if (raw instanceof ArrayBuffer) {
+      this.decodeBinaryPacket(raw);
+      return;
+    }
+    if (typeof Blob !== 'undefined' && raw instanceof Blob) {
+      raw.arrayBuffer().then((buf) => this.decodeBinaryPacket(buf));
+      return;
+    }
+    if (typeof raw !== 'string') return;
+
+    try {
+      const data = JSON.parse(raw);
+
+      // 1. Relay room lifecycle events
+      if (data.type === 'peer_connected') {
+        this.state = 'connected';
+        this.connectedDeviceName = this.mode === 'server' ? 'Mobile Tablet (Cloud Relay)' : 'PC Host (Cloud Relay)';
+        this.notify();
+        return;
+      }
+
+      if (data.type === 'room_joined') {
+        if (typeof data.peerCount === 'number' && data.peerCount > 1) {
+          this.state = 'connected';
+          this.connectedDeviceName = this.mode === 'server' ? 'Mobile Tablet (Cloud Relay)' : 'PC Host (Cloud Relay)';
+          this.notify();
+        }
+        return;
+      }
+
+      // 2. Direct flat pointer events from Flutter or external digitizers
+      if (
+        data.type === 'pointerDown' ||
+        data.type === 'pointerMove' ||
+        data.type === 'pointerUp' ||
+        data.type === 'hover'
+      ) {
+        this.onInputReceived?.({
+          x: typeof data.x === 'number' ? data.x : 0.5,
+          y: typeof data.y === 'number' ? data.y : 0.5,
+          pressure: typeof data.pressure === 'number' ? data.pressure : 0.5,
+          type: data.type === 'hover' ? 'pointerMove' : data.type,
+          pointerType: data.tool === 'eraser' ? 'eraser' : 'stylus',
+          pointerId: 1,
+          tiltX: 0,
+          tiltY: 0,
+          buttons: data.type === 'pointerDown' || data.type === 'pointerMove' ? 1 : 0,
+          sequenceNumber: 0,
+          timestamp: data.timestamp || Date.now(),
+        });
+        return;
+      }
+
+      // 3. Encapsulated input_event
+      if (data.type === 'input_event' && data.event) {
+        this.onInputReceived?.(data.event);
+        return;
+      }
+
+      if (data.type === 'brush_update' && data.brush) {
+        this.onBrushReceived?.(data.brush);
+        return;
+      }
+
+      if (data.type === 'action' && data.action) {
+        this.onActionReceived?.(data.action);
+        return;
+      }
+
+      // 4. Default internal channel message handler
+      this.handleChannelMessage(data);
+    } catch {}
+  }
+
+  private decodeBinaryPacket(buf: ArrayBuffer): void {
+    if (buf.byteLength < 8) return;
+    try {
+      const view = new DataView(buf);
+      const typeCode = view.getUint8(0);
+      const rawX = view.getUint16(1, true); // Little-endian
+      const rawY = view.getUint16(3, true);
+      const rawPressure = view.getUint16(5, true);
+      const toolByte = view.getUint8(7);
+
+      const normX = Math.max(0, Math.min(1, rawX / 65535.0));
+      const normY = Math.max(0, Math.min(1, rawY / 65535.0));
+      const pressure = Math.max(0, Math.min(1, rawPressure / 1024.0));
+      const tool = toolByte === 1 ? 'eraser' : (toolByte === 2 ? 'highlighter' : 'pen');
+      let type: 'pointerDown' | 'pointerMove' | 'pointerUp' = 'pointerMove';
+      if (typeCode === 0) type = 'pointerDown';
+      else if (typeCode === 2) type = 'pointerUp';
+
+      this.onInputReceived?.({
+        x: normX,
+        y: normY,
+        pressure,
+        type,
+        pointerType: tool === 'eraser' ? 'eraser' : 'stylus',
+        pointerId: 1,
+        tiltX: 0,
+        tiltY: 0,
+        buttons: type === 'pointerDown' || type === 'pointerMove' ? 1 : 0,
+        sequenceNumber: 0,
+        timestamp: Date.now(),
+      });
+    } catch (e) {
+      console.warn('Binary packet decode error', e);
+    }
   }
 
   public stopServer(): void {
@@ -323,7 +461,7 @@ export class ConnectionManager {
       maxPressure: this.maxPressureSetting,
     };
 
-    // Broadcast connection request
+    // Broadcast connection request via local BroadcastChannel
     this.bc?.postMessage({
       type: 'connect_request',
       senderId: this.id,
@@ -333,7 +471,51 @@ export class ConnectionManager {
       timestamp: Date.now(),
     });
 
-    // Simulated quick connect fallback for single tab / preview demo
+    // Real Network WebSocket connection
+    if (typeof window !== 'undefined') {
+      try {
+        if (this.ws) {
+          this.ws.close();
+          this.ws = null;
+        }
+
+        const isCloudRelay = ip === 'relay' || ip === 'cloud' || ip === window.location.hostname || ip.includes('.run.app');
+        let wsUrl: string;
+
+        if (isCloudRelay) {
+          const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+          wsUrl = `${proto}//${window.location.host}/ws?pin=${encodeURIComponent(pin)}&role=client`;
+        } else {
+          wsUrl = `ws://${ip}:${port}/aircanvas?pin=${encodeURIComponent(pin)}`;
+        }
+
+        const socket = new WebSocket(wsUrl);
+        socket.binaryType = 'arraybuffer';
+        this.ws = socket;
+
+        socket.onopen = () => {
+          this.state = 'connected';
+          const prefix = transport === 'usb' ? 'USB Cable' : (isCloudRelay ? 'Cloud Relay' : 'WiFi Host');
+          this.connectedDeviceName = `AirCanvas ${prefix} (${ip}:${port})`;
+          this.startHeartbeat();
+          this.notify();
+        };
+
+        socket.onmessage = (ev) => {
+          this.processIncomingSocketData(ev.data);
+        };
+
+        socket.onclose = () => {
+          if (this.state === 'connected') {
+            this.disconnect();
+          }
+        };
+      } catch (e) {
+        console.warn('[WebSocket] Connection attempt failed', e);
+      }
+    }
+
+    // Quick resolve fallback
     return new Promise((resolve) => {
       setTimeout(() => {
         if (this.state === 'connecting') {
@@ -348,7 +530,7 @@ export class ConnectionManager {
         } else {
           resolve(false);
         }
-      }, 400);
+      }, 500);
     });
   }
 
@@ -376,6 +558,10 @@ export class ConnectionManager {
       senderMode: this.mode,
       timestamp: Date.now(),
     });
+    if (this.ws) {
+      try { this.ws.close(); } catch {}
+      this.ws = null;
+    }
     this.state = 'disconnected';
     this.connectedDeviceName = '';
     this.remoteDeviceInfo = null;
@@ -385,35 +571,53 @@ export class ConnectionManager {
 
   public sendInputEvent(event: InputEventData): void {
     if (this.state !== 'connected') return;
-    this.bc?.postMessage({
+    const payload: ChannelMessage = {
       type: 'input_event',
       senderId: this.id,
       senderMode: this.mode,
       event,
       timestamp: Date.now(),
-    });
+    };
+    this.bc?.postMessage(payload);
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      try {
+        this.ws.send(JSON.stringify(payload));
+      } catch {}
+    }
   }
 
   public sendBrushUpdate(brush: Partial<BrushSettings>): void {
     if (this.state !== 'connected') return;
-    this.bc?.postMessage({
+    const payload: ChannelMessage = {
       type: 'brush_update',
       senderId: this.id,
       senderMode: this.mode,
       brush,
       timestamp: Date.now(),
-    });
+    };
+    this.bc?.postMessage(payload);
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      try {
+        this.ws.send(JSON.stringify(payload));
+      } catch {}
+    }
   }
 
   public sendAction(action: ClassAction): void {
     if (this.state !== 'connected') return;
-    this.bc?.postMessage({
+    const payload: ChannelMessage = {
       type: 'action',
       senderId: this.id,
       senderMode: this.mode,
       action,
       timestamp: Date.now(),
-    });
+    };
+    this.bc?.postMessage(payload);
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      try {
+        this.ws.send(JSON.stringify(payload));
+      } catch {}
+    }
   }
 
   private startHeartbeat(): void {

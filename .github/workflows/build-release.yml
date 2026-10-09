@@ -22,7 +22,7 @@ jobs:
       - name: Compile Native Windows Server Executable
         shell: cmd
         run: |
-          C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe /target:winexe /win32manifest:app.manifest /out:AirCanvas.exe /optimize+ /r:System.Drawing.dll /r:System.Windows.Forms.dll /r:System.dll AirCanvasServer.cs
+          C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe /target:exe /win32manifest:app.manifest /out:AirCanvas.exe /optimize+ /r:System.Drawing.dll /r:System.Windows.Forms.dll /r:System.dll AirCanvasServer.cs
 
       - name: Compress Windows Release Bundle
         shell: pwsh
@@ -85,8 +85,11 @@ jobs:
           perms = '''    <uses-permission android:name=\"android.permission.INTERNET\" />\n    <uses-permission android:name=\"android.permission.ACCESS_NETWORK_STATE\" />\n    <uses-permission android:name=\"android.permission.ACCESS_WIFI_STATE\" />\n    <uses-permission android:name=\"android.permission.CHANGE_WIFI_MULTICAST_STATE\" />\n    <uses-permission android:name=\"android.permission.NEARBY_WIFI_DEVICES\" android:usesPermissionFlags=\"neverForLocation\" />\n'''
           if 'android.permission.INTERNET' not in content:
               content = content.replace('<application', perms + '    <application')
-              with open(p, 'w') as f: f.write(content)
-          print('Updated AndroidManifest with network permissions successfully.')
+          if 'android:usesCleartextTraffic' not in content:
+              content = content.replace('<application', '<application
+        android:usesCleartextTraffic="true"')
+          with open(p, 'w') as f: f.write(content)
+          print('Updated AndroidManifest with network permissions and usesCleartextTraffic successfully.')
           "
 
       - name: Install dependencies

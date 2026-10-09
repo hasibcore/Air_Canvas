@@ -93,9 +93,11 @@ class TabletScreen extends StatefulWidget {
 
 class _TabletScreenState extends State<TabletScreen> {
   // Connection Configuration
+  String _connectionMode = 'wifi'; // 'wifi', 'usb', 'cloud'
   String _serverIp = '192.168.1.105';
   int _serverPort = 9090;
   String _pairingPin = '1234';
+  String _cloudRelayHost = 'ais-dev-wagmzzgimsj3rkh5tc4yb3-89008514509.asia-southeast1.run.app';
   bool _useBinaryProtocol = true;
 
   // Connection State
@@ -107,6 +109,9 @@ class _TabletScreenState extends State<TabletScreen> {
   int _packetsSent = 0;
   Timer? _pingTimer;
   Timer? _reconnectTimer;
+
+  // Auto-discovery state
+  bool _isDiscovering = false;
 
   // Drawing & Digitizer State
   final List<TabletStroke> _strokes = [];
@@ -148,26 +153,174 @@ class _TabletScreenState extends State<TabletScreen> {
   }
 
   // ---------------------------------------------------------------------------
-  // WebSocket Connection Management
+  // WebSocket Connection Management (USB, Wi-Fi, Cloud Relay)
   // ---------------------------------------------------------------------------
+  void _parseAndApplyQrString(String raw) {
+    final input = raw.trim();
+    if (input.isEmpty) return;
+
+    // 1. Try JSON format: {"app":"AirCanvas","ip":"...","port":9090,"pin":"1234"}
+    if (input.startsWith('{') && input.endsWith('}')) {
+      try {
+        final map = jsonDecode(input);
+        if (map['ip'] != null) {
+          setState(() {
+            _serverIp = map['ip'].toString();
+            _serverPort = int.tryParse(map['port']?.toString() ?? '9090') ?? 9090;
+            _pairingPin = map['pin']?.toString() ?? '1234';
+            _connectionMode = 'wifi';
+          });
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Scanned Config: $_serverIp:$_serverPort (PIN: $_pairingPin)'),
+              backgroundColor: const Color(0xFF10B981),
+            ),
+          );
+          _disconnectFromServer();
+          _connectToServer();
+          return;
+        }
+      } catch (_) {}
+    }
+
+    // 2. Try URL / Deep Link: https://.../?connect=true&ip=...&port=9090&pin=1234
+    if (input.startsWith('http://') ||
+        input.startsWith('https://') ||
+        input.startsWith('aircanvas://') ||
+        input.startsWith('ws://') ||
+        input.startsWith('wss://')) {
+      try {
+        final uri = Uri.parse(input);
+        final ipParam = uri.queryParameters['ip'];
+        final portParam = uri.queryParameters['port'];
+        final pinParam = uri.queryParameters['pin'];
+
+        if (ipParam != null && ipParam.isNotEmpty) {
+          final isWebRelay = ipParam.contains('.run.app') || ipParam == 'relay' || ipParam == uri.host;
+          setState(() {
+            _serverIp = ipParam;
+            _serverPort = int.tryParse(portParam ?? '9090') ?? 9090;
+            _pairingPin = pinParam ?? '1234';
+            if (isWebRelay) {
+              _cloudRelayHost = uri.host.isNotEmpty ? uri.host : ipParam;
+              _connectionMode = 'cloud';
+            } else {
+              _connectionMode = 'wifi';
+            }
+          });
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Connected via QR Link (${_connectionMode.toUpperCase()})'),
+              backgroundColor: const Color(0xFF10B981),
+            ),
+          );
+          _disconnectFromServer();
+          _connectToServer();
+          return;
+        } else if (uri.host.isNotEmpty) {
+          setState(() {
+            _cloudRelayHost = uri.host;
+            _pairingPin = pinParam ?? '1234';
+            _connectionMode = 'cloud';
+          });
+          _disconnectFromServer();
+          _connectToServer();
+          return;
+        }
+      } catch (_) {}
+    }
+
+    // 3. Plain IP:PORT:PIN or IP:PORT or plain IP
+    final parts = input.split(':');
+    if (parts.isNotEmpty) {
+      final ip = parts[0].trim();
+      if (ip.isNotEmpty) {
+        final port = parts.length > 1 ? (int.tryParse(parts[1].trim()) ?? 9090) : 9090;
+        final pin = parts.length > 2 ? parts[2].trim() : '1234';
+        setState(() {
+          _serverIp = ip;
+          _serverPort = port;
+          _pairingPin = pin;
+          _connectionMode = 'wifi';
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Connecting to $ip:$port...'),
+            backgroundColor: const Color(0xFF00E5FF),
+          ),
+        );
+        _disconnectFromServer();
+        _connectToServer();
+      }
+    }
+  }
+
   Future<void> _connectToServer() async {
     if (_isConnecting || _isConnected) return;
 
+    // Sanitize Server IP
+    String cleanIp = _serverIp.trim();
+    if (cleanIp.startsWith('http://')) cleanIp = cleanIp.substring(7);
+    if (cleanIp.startsWith('https://')) cleanIp = cleanIp.substring(8);
+    if (cleanIp.startsWith('ws://')) cleanIp = cleanIp.substring(5);
+    if (cleanIp.startsWith('wss://')) cleanIp = cleanIp.substring(6);
+    if (cleanIp.contains(':')) {
+      final split = cleanIp.split(':');
+      cleanIp = split[0];
+      if (split.length > 1) {
+        _serverPort = int.tryParse(split[1]) ?? _serverPort;
+      }
+    }
+    _serverIp = cleanIp.isNotEmpty ? cleanIp : '192.168.1.105';
+
+    // Sanitize Cloud Relay Host
+    String host = _cloudRelayHost.trim();
+    if (host.startsWith('https://')) host = host.substring(8);
+    if (host.startsWith('http://')) host = host.substring(7);
+    if (host.startsWith('wss://')) host = host.substring(6);
+    if (host.startsWith('ws://')) host = host.substring(5);
+    if (host.endsWith('/')) host = host.substring(0, host.length - 1);
+    _cloudRelayHost = host.isNotEmpty ? host : 'ais-dev-wagmzzgimsj3rkh5tc4yb3-89008514509.asia-southeast1.run.app';
+
     setState(() {
       _isConnecting = true;
-      _connectionStatus = 'Connecting to $_serverIp:$_serverPort...';
+      if (_connectionMode == 'usb') {
+        _connectionStatus = 'Connecting via USB (127.0.0.1:$_serverPort)...';
+      } else if (_connectionMode == 'cloud') {
+        _connectionStatus = 'Connecting to Cloud Relay (PIN: $_pairingPin)...';
+      } else {
+        _connectionStatus = 'Connecting to Wi-Fi ($_serverIp:$_serverPort)...';
+      }
     });
 
     try {
-      final uri = Uri.parse('ws://$_serverIp:$_serverPort/aircanvas?pin=$_pairingPin');
+      Uri uri;
+      if (_connectionMode == 'usb') {
+        // USB Cable via adb reverse tcp:9090 tcp:9090
+        uri = Uri.parse('ws://127.0.0.1:$_serverPort/aircanvas?pin=$_pairingPin');
+      } else if (_connectionMode == 'cloud') {
+        // Cloud Web Relay
+        final scheme = (host.startsWith('localhost') || host.startsWith('127.0.0.1') || host.startsWith('192.168.') || host.startsWith('10.')) ? 'ws' : 'wss';
+        uri = Uri.parse('$scheme://$host/ws?pin=$_pairingPin&role=client');
+      } else {
+        // Direct local Wi-Fi / LAN IP
+        uri = Uri.parse('ws://$_serverIp:$_serverPort/aircanvas?pin=$_pairingPin');
+      }
+
       final socket = await WebSocket.connect(uri.toString())
-          .timeout(const Duration(seconds: 3));
+          .timeout(const Duration(seconds: 4));
 
       _socket = socket;
       setState(() {
         _isConnected = true;
         _isConnecting = false;
-        _connectionStatus = 'Connected to PC ($_serverIp)';
+        if (_connectionMode == 'usb') {
+          _connectionStatus = 'Connected via USB (0ms Latency)';
+        } else if (_connectionMode == 'cloud') {
+          _connectionStatus = 'Connected via Cloud (PIN: $_pairingPin)';
+        } else {
+          _connectionStatus = 'Connected to PC ($_serverIp:$_serverPort)';
+        }
       });
 
       // Listen for server incoming messages (latency pongs, screen bounds info)
@@ -186,10 +339,109 @@ class _TabletScreenState extends State<TabletScreen> {
       // Start ping loop for latency calculation
       _startPingLoop();
     } catch (e) {
+      // If USB failed on 127.0.0.1, attempt 10.0.2.2 fallback (for Android emulator testing)
+      if (_connectionMode == 'usb') {
+        try {
+          final altUri = Uri.parse('ws://10.0.2.2:$_serverPort/aircanvas?pin=$_pairingPin');
+          final altSocket = await WebSocket.connect(altUri.toString())
+              .timeout(const Duration(seconds: 2));
+          _socket = altSocket;
+          setState(() {
+            _isConnected = true;
+            _isConnecting = false;
+            _connectionStatus = 'Connected via USB (Host)';
+          });
+          _socket?.listen((d) => _handleServerMessage(d), onError: (err) => _handleDisconnect('$err'), onDone: () => _handleDisconnect('Disconnected'));
+          _startPingLoop();
+          return;
+        } catch (_) {}
+      }
+
       setState(() {
         _isConnecting = false;
         _isConnected = false;
-        _connectionStatus = 'Failed to connect. Tap ⚙ to change IP';
+        if (_connectionMode == 'usb') {
+          _connectionStatus = 'USB failed. Run: adb reverse tcp:9090 tcp:9090';
+        } else if (_connectionMode == 'cloud') {
+          _connectionStatus = 'Cloud Relay failed. Check Internet or PIN: $_pairingPin';
+        } else {
+          _connectionStatus = 'Wi-Fi failed. Check IP & Windows Firewall.';
+        }
+      });
+    }
+  }
+
+  Future<void> _autoDiscoverPc() async {
+    if (_isDiscovering) return;
+    setState(() {
+      _isDiscovering = true;
+      _connectionStatus = 'Searching local Wi-Fi for PC...';
+    });
+
+    try {
+      final RawDatagramSocket udp = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
+      udp.broadcastEnabled = true;
+      final query = utf8.encode('AIR_CANVAS_DISCOVERY');
+      udp.send(query, InternetAddress('255.255.255.255'), 9091);
+
+      final completer = Completer<String?>();
+      Timer(const Duration(seconds: 3), () {
+        if (!completer.isCompleted) {
+          try { udp.close(); } catch (_) {}
+          completer.complete(null);
+        }
+      });
+
+      udp.listen((event) {
+        if (event == RawSocketEvent.read) {
+          final dg = udp.receive();
+          if (dg != null) {
+            final reply = utf8.decode(dg.data);
+            try {
+              final map = jsonDecode(reply);
+              if (map['ip'] != null) {
+                final foundIp = map['ip'].toString();
+                if (!completer.isCompleted) {
+                  try { udp.close(); } catch (_) {}
+                  completer.complete(foundIp);
+                }
+              }
+            } catch (_) {}
+          }
+        }
+      });
+
+      final discoveredIp = await completer.future;
+      setState(() {
+        _isDiscovering = false;
+      });
+
+      if (discoveredIp != null && discoveredIp.isNotEmpty) {
+        setState(() {
+          _serverIp = discoveredIp;
+          _connectionMode = 'wifi';
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Found PC at $discoveredIp! Connecting...'),
+            backgroundColor: const Color(0xFF10B981),
+            duration: const Duration(seconds: 2),
+          ),
+        );
+        _disconnectFromServer();
+        _connectToServer();
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Could not auto-detect PC. Enter IP manually or try USB cable mode.'),
+            backgroundColor: Color(0xFFEF4444),
+            duration: Duration(seconds: 3),
+          ),
+        );
+      }
+    } catch (e) {
+      setState(() {
+        _isDiscovering = false;
       });
     }
   }
@@ -416,12 +668,13 @@ class _TabletScreenState extends State<TabletScreen> {
   }
 
   // ---------------------------------------------------------------------------
-  // Settings & Connection Dialog
+  // Settings & Connection Dialog (Wi-Fi, USB Cable, Cloud Relay)
   // ---------------------------------------------------------------------------
   void _openSettingsDialog() {
     final ipController = TextEditingController(text: _serverIp);
     final portController = TextEditingController(text: _serverPort.toString());
     final pinController = TextEditingController(text: _pairingPin);
+    String dialogMode = _connectionMode;
 
     showDialog(
       context: context,
@@ -440,154 +693,344 @@ class _TabletScreenState extends State<TabletScreen> {
                   color: const Color(0xFF00E5FF).withOpacity(0.15),
                   borderRadius: BorderRadius.circular(12),
                 ),
-                child: const Icon(Icons.wifi, color: Color(0xFF00E5FF), size: 24),
+                child: Icon(
+                  dialogMode == 'usb' ? Icons.usb : (dialogMode == 'cloud' ? Icons.cloud_queue : Icons.wifi),
+                  color: const Color(0xFF00E5FF),
+                  size: 24,
+                ),
               ),
               const SizedBox(width: 12),
-              const Column(
+              Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text('Connect to Windows PC',
+                  const Text('Connect to Windows PC',
                       style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)),
-                  Text('AirCanvas Server Setup',
-                      style: TextStyle(color: Colors.white54, fontSize: 11)),
+                  Text(
+                    dialogMode == 'usb' ? 'USB High-Speed Cable Mode' : (dialogMode == 'cloud' ? 'Web QR / Cloud Relay' : 'Local Wi-Fi Network Mode'),
+                    style: const TextStyle(color: Colors.white54, fontSize: 11),
+                  ),
                 ],
               ),
             ],
           ),
           content: SingleChildScrollView(
             child: SizedBox(
-              width: 380,
+              width: 440,
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Text('Windows PC IP Address:',
-                      style: TextStyle(color: Colors.white70, fontSize: 12, fontWeight: FontWeight.bold)),
-                  const SizedBox(height: 6),
-                  TextField(
-                    controller: ipController,
-                    style: const TextStyle(color: Colors.white, fontFamily: 'monospace'),
-                    decoration: InputDecoration(
-                      filled: true,
-                      fillColor: const Color(0xFF1E293B),
-                      hintText: 'e.g. 192.168.1.105',
-                      hintStyle: const TextStyle(color: Colors.white38),
-                      prefixIcon: const Icon(Icons.computer, color: Color(0xFF00E5FF), size: 18),
-                      border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(12),
-                        borderSide: const BorderSide(color: Color(0xFF334155)),
-                      ),
-                      focusedBorder: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(12),
-                        borderSide: const BorderSide(color: Color(0xFF00E5FF)),
-                      ),
+                  // Mode Selection Segmented Buttons
+                  Container(
+                    padding: const EdgeInsets.all(3),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF1E293B),
+                      borderRadius: BorderRadius.circular(14),
+                      border: Border.all(color: const Color(0xFF334155)),
+                    ),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: InkWell(
+                            onTap: () => setDialogState(() => dialogMode = 'wifi'),
+                            borderRadius: BorderRadius.circular(10),
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(vertical: 8),
+                              decoration: BoxDecoration(
+                                color: dialogMode == 'wifi' ? const Color(0xFF00E5FF) : Colors.transparent,
+                                borderRadius: BorderRadius.circular(10),
+                              ),
+                              child: Center(
+                                child: Text(
+                                  '📶 Wi-Fi LAN',
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.bold,
+                                    color: dialogMode == 'wifi' ? const Color(0xFF090D16) : Colors.white70,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                        Expanded(
+                          child: InkWell(
+                            onTap: () => setDialogState(() => dialogMode = 'usb'),
+                            borderRadius: BorderRadius.circular(10),
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(vertical: 8),
+                              decoration: BoxDecoration(
+                                color: dialogMode == 'usb' ? const Color(0xFF00E5FF) : Colors.transparent,
+                                borderRadius: BorderRadius.circular(10),
+                              ),
+                              child: Center(
+                                child: Text(
+                                  '🔌 USB Cable',
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.bold,
+                                    color: dialogMode == 'usb' ? const Color(0xFF090D16) : Colors.white70,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                        Expanded(
+                          child: InkWell(
+                            onTap: () => setDialogState(() => dialogMode = 'cloud'),
+                            borderRadius: BorderRadius.circular(10),
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(vertical: 8),
+                              decoration: BoxDecoration(
+                                color: dialogMode == 'cloud' ? const Color(0xFF00E5FF) : Colors.transparent,
+                                borderRadius: BorderRadius.circular(10),
+                              ),
+                              child: Center(
+                                child: Text(
+                                  '☁️ Cloud / QR',
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.bold,
+                                    color: dialogMode == 'cloud' ? const Color(0xFF090D16) : Colors.white70,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
                   ),
-                  const SizedBox(height: 14),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const Text('Port:',
-                                style: TextStyle(color: Colors.white70, fontSize: 12, fontWeight: FontWeight.bold)),
-                            const SizedBox(height: 6),
-                            TextField(
-                              controller: portController,
-                              keyboardType: TextInputType.number,
-                              style: const TextStyle(color: Colors.white, fontFamily: 'monospace'),
-                              decoration: InputDecoration(
-                                filled: true,
-                                fillColor: const Color(0xFF1E293B),
-                                border: OutlineInputBorder(
-                                  borderRadius: BorderRadius.circular(12),
-                                  borderSide: const BorderSide(color: Color(0xFF334155)),
+                  const SizedBox(height: 16),
+
+                  // Content based on selected mode
+                  if (dialogMode == 'usb') ...[
+                    // USB Mode Instructions
+                    Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF1E293B),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: const Color(0xFF00E5FF).withOpacity(0.3)),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Row(
+                            children: [
+                              Icon(Icons.bolt, color: Color(0xFF00E5FF), size: 16),
+                              SizedBox(width: 6),
+                              Text('Zero-Lag USB ADB Setup:', style: TextStyle(color: Color(0xFF00E5FF), fontSize: 12, fontWeight: FontWeight.bold)),
+                            ],
+                          ),
+                          const SizedBox(height: 6),
+                          const Text('1. Connect phone to PC via USB cable (Enable USB Debugging).', style: TextStyle(color: Colors.white70, fontSize: 11)),
+                          const SizedBox(height: 4),
+                          const Text('2. In PC Command Prompt (CMD), run:', style: TextStyle(color: Colors.white70, fontSize: 11)),
+                          const SizedBox(height: 4),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                            decoration: BoxDecoration(
+                              color: Colors.black45,
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                const Text('adb reverse tcp:9090 tcp:9090', style: TextStyle(color: Color(0xFF00E5FF), fontFamily: 'monospace', fontSize: 11, fontWeight: FontWeight.bold)),
+                                InkWell(
+                                  onTap: () {
+                                    Clipboard.setData(const ClipboardData(text: 'adb reverse tcp:9090 tcp:9090'));
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      const SnackBar(content: Text('Copied: adb reverse tcp:9090 tcp:9090'), duration: Duration(seconds: 2)),
+                                    );
+                                  },
+                                  child: const Icon(Icons.copy, color: Color(0xFF00E5FF), size: 16),
                                 ),
+                              ],
+                            ),
+                          ),
+                          const SizedBox(height: 6),
+                          const Text('3. Then tap "Connect USB" below!', style: TextStyle(color: Colors.white70, fontSize: 11)),
+                        ],
+                      ),
+                    ),
+                  ] else if (dialogMode == 'cloud') ...[
+                    // Cloud Relay Mode
+                    Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF1E293B),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: const Color(0xFFA855F7).withOpacity(0.4)),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Row(
+                            children: [
+                              Icon(Icons.cloud_done, color: Color(0xFFA855F7), size: 16),
+                              SizedBox(width: 6),
+                              Text('No Local Wi-Fi Needed (QR / Cloud):', style: TextStyle(color: Color(0xFFA855F7), fontSize: 12, fontWeight: FontWeight.bold)),
+                            ],
+                          ),
+                          const SizedBox(height: 4),
+                          const Text('Enter the 4-digit PIN displayed on your PC screen (or paste QR Code / URL) to pair across any network!', style: TextStyle(color: Colors.white70, fontSize: 11)),
+                          const SizedBox(height: 10),
+                          const Text('Pairing PIN:', style: TextStyle(color: Colors.white70, fontSize: 11, fontWeight: FontWeight.bold)),
+                          const SizedBox(height: 4),
+                          TextField(
+                            controller: pinController,
+                            keyboardType: TextInputType.number,
+                            style: const TextStyle(color: Colors.white, fontSize: 18, fontFamily: 'monospace', fontWeight: FontWeight.bold, letterSpacing: 4),
+                            decoration: InputDecoration(
+                              filled: true,
+                              fillColor: const Color(0xFF0F172A),
+                              prefixIcon: const Icon(Icons.key, color: Color(0xFFA855F7), size: 18),
+                              border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: Color(0xFF334155))),
+                              focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: Color(0xFFA855F7))),
+                            ),
+                          ),
+                          const SizedBox(height: 10),
+                          InkWell(
+                            onTap: () async {
+                              final clipData = await Clipboard.getData('text/plain');
+                              if (clipData != null && clipData.text != null && clipData.text!.isNotEmpty) {
+                                Navigator.pop(ctx);
+                                _parseAndApplyQrString(clipData.text!);
+                              } else {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(content: Text('Clipboard is empty! Copy QR Link first.')),
+                                );
+                              }
+                            },
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 12),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFFA855F7).withOpacity(0.15),
+                                borderRadius: BorderRadius.circular(8),
+                                border: Border.all(color: const Color(0xFFA855F7).withOpacity(0.4)),
+                              ),
+                              child: const Row(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  Icon(Icons.qr_code_scanner, color: Color(0xFFA855F7), size: 16),
+                                  SizedBox(width: 8),
+                                  Text('📋 Paste Scanned QR Link / IP', style: TextStyle(color: Color(0xFFA855F7), fontWeight: FontWeight.bold, fontSize: 12)),
+                                ],
                               ),
                             ),
-                          ],
-                        ),
+                          ),
+                        ],
                       ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const Text('Pairing PIN:',
-                                style: TextStyle(color: Colors.white70, fontSize: 12, fontWeight: FontWeight.bold)),
-                            const SizedBox(height: 6),
-                            TextField(
-                              controller: pinController,
-                              keyboardType: TextInputType.number,
-                              style: const TextStyle(color: Colors.white, fontFamily: 'monospace'),
-                              decoration: InputDecoration(
-                                filled: true,
-                                fillColor: const Color(0xFF1E293B),
-                                border: OutlineInputBorder(
-                                  borderRadius: BorderRadius.circular(12),
-                                  borderSide: const BorderSide(color: Color(0xFF334155)),
+                    ),
+                  ] else ...[
+                    // Wi-Fi LAN Mode
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        const Text('Windows PC IP Address:', style: TextStyle(color: Colors.white70, fontSize: 12, fontWeight: FontWeight.bold)),
+                        InkWell(
+                          onTap: () async {
+                            Navigator.pop(ctx);
+                            await _autoDiscoverPc();
+                          },
+                          child: const Text('🔍 Auto-Detect PC', style: TextStyle(color: Color(0xFF00E5FF), fontSize: 11, fontWeight: FontWeight.bold)),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 6),
+                    TextField(
+                      controller: ipController,
+                      style: const TextStyle(color: Colors.white, fontFamily: 'monospace'),
+                      decoration: InputDecoration(
+                        filled: true,
+                        fillColor: const Color(0xFF1E293B),
+                        hintText: 'e.g. 192.168.1.105',
+                        hintStyle: const TextStyle(color: Colors.white38),
+                        prefixIcon: const Icon(Icons.computer, color: Color(0xFF00E5FF), size: 18),
+                        border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: Color(0xFF334155))),
+                        focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: Color(0xFF00E5FF))),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    // Quick Subnet helper chips
+                    SingleChildScrollView(
+                      scrollDirection: Axis.horizontal,
+                      child: Row(
+                        children: [
+                          const Text('Presets: ', style: TextStyle(color: Colors.white38, fontSize: 10)),
+                          _buildSubnetChip('192.168.1.', ipController),
+                          const SizedBox(width: 4),
+                          _buildSubnetChip('192.168.0.', ipController),
+                          const SizedBox(width: 4),
+                          _buildSubnetChip('192.168.43.', ipController),
+                          const SizedBox(width: 4),
+                          _buildSubnetChip('10.0.0.', ipController),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Text('Port:', style: TextStyle(color: Colors.white70, fontSize: 11, fontWeight: FontWeight.bold)),
+                              const SizedBox(height: 4),
+                              TextField(
+                                controller: portController,
+                                keyboardType: TextInputType.number,
+                                style: const TextStyle(color: Colors.white, fontFamily: 'monospace'),
+                                decoration: InputDecoration(
+                                  filled: true,
+                                  fillColor: const Color(0xFF1E293B),
+                                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: Color(0xFF334155))),
                                 ),
                               ),
-                            ),
-                          ],
+                            ],
+                          ),
                         ),
-                      ),
-                    ],
-                  ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Text('PIN:', style: TextStyle(color: Colors.white70, fontSize: 11, fontWeight: FontWeight.bold)),
+                              const SizedBox(height: 4),
+                              TextField(
+                                controller: pinController,
+                                keyboardType: TextInputType.number,
+                                style: const TextStyle(color: Colors.white, fontFamily: 'monospace'),
+                                decoration: InputDecoration(
+                                  filled: true,
+                                  fillColor: const Color(0xFF1E293B),
+                                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: const BorderSide(color: Color(0xFF334155))),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+
                   const SizedBox(height: 14),
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      const Text('Ultra-Fast Binary Protocol:',
-                          style: TextStyle(color: Colors.white70, fontSize: 12)),
+                      const Text('Ultra-Fast Binary Protocol:', style: TextStyle(color: Colors.white70, fontSize: 12)),
                       Switch(
                         value: _useBinaryProtocol,
                         activeColor: const Color(0xFF00E5FF),
                         onChanged: (val) {
-                          setDialogState(() {
-                            _useBinaryProtocol = val;
-                          });
-                          setState(() {
-                            _useBinaryProtocol = val;
-                          });
+                          setDialogState(() => _useBinaryProtocol = val);
+                          setState(() => _useBinaryProtocol = val);
                         },
                       ),
                     ],
-                  ),
-                  const SizedBox(height: 10),
-                  // Quick Test Calibration Button
-                  InkWell(
-                    onTap: () {
-                      _sendPointerEvent('pointerDown', 0.5, 0.5, 0.75);
-                      Future.delayed(const Duration(milliseconds: 100), () {
-                        _sendPointerEvent('pointerUp', 0.5, 0.5, 0.0);
-                      });
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(
-                          content: Text('Transmitted Exact Center (0.5, 0.5) to PC!'),
-                          duration: Duration(seconds: 1),
-                        ),
-                      );
-                    },
-                    borderRadius: BorderRadius.circular(12),
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFF1E293B),
-                        borderRadius: BorderRadius.circular(12),
-                        border: Border.all(color: const Color(0xFF334155)),
-                      ),
-                      child: const Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          Icon(Icons.center_focus_strong, color: Color(0xFF00E5FF), size: 16),
-                          SizedBox(width: 8),
-                          Text('Send Center Checkpoint (0.5, 0.5)',
-                              style: TextStyle(color: Color(0xFF00E5FF), fontSize: 11, fontWeight: FontWeight.bold)),
-                        ],
-                      ),
-                    ),
                   ),
                 ],
               ),
@@ -601,6 +1044,7 @@ class _TabletScreenState extends State<TabletScreen> {
             ElevatedButton(
               onPressed: () {
                 setState(() {
+                  _connectionMode = dialogMode;
                   _serverIp = ipController.text.trim();
                   _serverPort = int.tryParse(portController.text.trim()) ?? 9090;
                   _pairingPin = pinController.text.trim();
@@ -612,12 +1056,33 @@ class _TabletScreenState extends State<TabletScreen> {
               style: ElevatedButton.styleFrom(
                 backgroundColor: const Color(0xFF00E5FF),
                 foregroundColor: const Color(0xFF090D16),
+                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
                 shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
               ),
-              child: const Text('Connect', style: TextStyle(fontWeight: FontWeight.bold)),
+              child: Text(
+                dialogMode == 'usb' ? 'Connect USB' : (dialogMode == 'cloud' ? 'Connect Cloud' : 'Connect Wi-Fi'),
+                style: const TextStyle(fontWeight: FontWeight.bold),
+              ),
             ),
           ],
         ),
+      ),
+    );
+  }
+
+  Widget _buildSubnetChip(String prefix, TextEditingController controller) {
+    return InkWell(
+      onTap: () {
+        controller.text = '${prefix}100';
+      },
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+        decoration: BoxDecoration(
+          color: const Color(0xFF1E293B),
+          borderRadius: BorderRadius.circular(6),
+          border: Border.all(color: Colors.white12),
+        ),
+        child: Text('${prefix}x', style: const TextStyle(color: Colors.white60, fontSize: 10, fontFamily: 'monospace')),
       ),
     );
   }

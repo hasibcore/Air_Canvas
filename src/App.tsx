@@ -80,6 +80,11 @@ export function App() {
             setView('tablet');
           }
         });
+      } else {
+        // On host PC: auto-start server relay listener for PIN 1234 so QR scanning pairs instantly
+        if (connection.state === 'disconnected') {
+          connection.startServer('1234');
+        }
       }
     } catch (e) {
       console.warn('Error reading connection URL query', e);

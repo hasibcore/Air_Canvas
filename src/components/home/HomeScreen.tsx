@@ -74,7 +74,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
   const [isWritingDemoActive, setIsWritingDemoActive] = useState(false);
 
   const isConnected = connection.state === 'connected';
-  const isServerRunning = connection.state === 'discovering' && connection.mode === 'server';
+  const isServerRunning = (connection.state === 'discovering' || connection.state === 'connected') && connection.mode === 'server';
 
   const handleStartStopServer = () => {
     if (isServerRunning) {

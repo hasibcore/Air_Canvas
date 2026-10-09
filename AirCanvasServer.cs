@@ -636,6 +636,381 @@ namespace AirCanvas.Server
             Console.WriteLine();
         }
 
+        private static bool _isRunning = true;
+        private static TcpListener _tcpListener = null;
+        private static UdpClient _udpListener = null;
+
+        public static void StartWebSocketServer()
+        {
+            try
+            {
+                _tcpListener = new TcpListener(IPAddress.Any, DEFAULT_PORT);
+                _tcpListener.Start();
+
+                Thread listenThread = new Thread(() =>
+                {
+                    while (_isRunning)
+                    {
+                        try
+                        {
+                            TcpClient client = _tcpListener.AcceptTcpClient();
+                            Thread clientThread = new Thread(() => HandleClient(client));
+                            clientThread.IsBackground = true;
+                            clientThread.Start();
+                        }
+                        catch
+                        {
+                            if (!_isRunning) break;
+                        }
+                    }
+                });
+                listenThread.IsBackground = true;
+                listenThread.Start();
+            }
+            catch (Exception ex)
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine("[ERROR] Failed to start WebSocket listener on port " + DEFAULT_PORT + ": " + ex.Message);
+                Console.WriteLine("        Try running Fix_Firewall.bat or run as Administrator.");
+                Console.ResetColor();
+            }
+        }
+
+        public static void StartUdpDiscovery()
+        {
+            try
+            {
+                _udpListener = new UdpClient(DISCOVERY_PORT);
+                Thread udpThread = new Thread(() =>
+                {
+                    IPEndPoint remoteEP = new IPEndPoint(IPAddress.Any, 0);
+                    while (_isRunning)
+                    {
+                        try
+                        {
+                            byte[] data = _udpListener.Receive(ref remoteEP);
+                            string msg = Encoding.UTF8.GetString(data);
+                            if (msg.Contains("DISCOVERY") || msg.Contains("PING"))
+                            {
+                                string localIp = GetPrimaryLocalIp();
+                                string reply = "{\"app\":\"AirCanvas\",\"name\":\"" + Environment.MachineName + "\",\"ip\":\"" + localIp + "\",\"port\":" + DEFAULT_PORT + ",\"version\":\"" + VERSION + "\"}";
+                                byte[] replyBytes = Encoding.UTF8.GetBytes(reply);
+                                _udpListener.Send(replyBytes, replyBytes.Length, remoteEP);
+                            }
+                        }
+                        catch
+                        {
+                            if (!_isRunning) break;
+                        }
+                    }
+                });
+                udpThread.IsBackground = true;
+                udpThread.Start();
+            }
+            catch { }
+        }
+
+        private static void HandleClient(TcpClient client)
+        {
+            try
+            {
+                client.NoDelay = true; // Ultra low latency TCP
+                using (NetworkStream stream = client.GetStream())
+                {
+                    byte[] buffer = new byte[4096];
+                    int bytesRead = stream.Read(buffer, 0, buffer.Length);
+                    if (bytesRead <= 0) return;
+
+                    string request = Encoding.UTF8.GetString(buffer, 0, bytesRead);
+
+                    // If simple HTTP probe / health check
+                    if (!request.Contains("Upgrade: websocket") && !request.Contains("upgrade: websocket"))
+                    {
+                        string httpResp = "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: text/plain\r\n\r\nAirCanvas Windows Server v" + VERSION + " is ACTIVE on port " + DEFAULT_PORT + ".\n";
+                        byte[] respBytes = Encoding.UTF8.GetBytes(httpResp);
+                        stream.Write(respBytes, 0, respBytes.Length);
+                        return;
+                    }
+
+                    // Extract Sec-WebSocket-Key
+                    string key = "";
+                    string[] lines = request.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None);
+                    foreach (string line in lines)
+                    {
+                        if (line.StartsWith("Sec-WebSocket-Key:", StringComparison.OrdinalIgnoreCase))
+                        {
+                            key = line.Substring("Sec-WebSocket-Key:".Length).Trim();
+                            break;
+                        }
+                    }
+
+                    if (string.IsNullOrEmpty(key)) return;
+
+                    // Standard RFC 6455 Handshake Response
+                    string magic = key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+                    byte[] hash = SHA1.Create().ComputeHash(Encoding.UTF8.GetBytes(magic));
+                    string acceptKey = Convert.ToBase64String(hash);
+
+                    string response = "HTTP/1.1 101 Switching Protocols\r\n" +
+                                      "Upgrade: websocket\r\n" +
+                                      "Connection: Upgrade\r\n" +
+                                      "Sec-WebSocket-Accept: " + acceptKey + "\r\n\r\n";
+                    byte[] responseBytes = Encoding.UTF8.GetBytes(response);
+                    stream.Write(responseBytes, 0, responseBytes.Length);
+
+                    Console.ForegroundColor = ConsoleColor.Green;
+                    Console.WriteLine("[CONNECTED] Mobile tablet paired: " + client.Client.RemoteEndPoint);
+                    Console.ResetColor();
+
+                    // Read frames
+                    while (_isRunning && client.Connected)
+                    {
+                        int b0 = stream.ReadByte();
+                        if (b0 == -1) break;
+
+                        int opcode = b0 & 0x0F;
+                        if (opcode == 0x8) break; // Close
+
+                        int b1 = stream.ReadByte();
+                        if (b1 == -1) break;
+
+                        bool masked = (b1 & 0x80) != 0;
+                        long payloadLength = b1 & 0x7F;
+
+                        if (payloadLength == 126)
+                        {
+                            int l0 = stream.ReadByte();
+                            int l1 = stream.ReadByte();
+                            payloadLength = (l0 << 8) | l1;
+                        }
+                        else if (payloadLength == 127)
+                        {
+                            byte[] lenBytes = new byte[8];
+                            ReadExact(stream, lenBytes, 8);
+                            Array.Reverse(lenBytes);
+                            payloadLength = BitConverter.ToInt64(lenBytes, 0);
+                        }
+
+                        byte[] maskKey = new byte[4];
+                        if (masked)
+                        {
+                            ReadExact(stream, maskKey, 4);
+                        }
+
+                        byte[] payload = new byte[payloadLength];
+                        ReadExact(stream, payload, (int)payloadLength);
+
+                        if (masked)
+                        {
+                            for (int i = 0; i < payload.Length; i++)
+                            {
+                                payload[i] ^= maskKey[i % 4];
+                            }
+                        }
+
+                        if (opcode == 0x1) // JSON Text Frame
+                        {
+                            string json = Encoding.UTF8.GetString(payload);
+                            ProcessJsonPacket(json, stream);
+                        }
+                        else if (opcode == 0x2) // Binary Frame
+                        {
+                            ProcessBinaryPacket(payload, payload.Length, stream, client);
+                        }
+                        else if (opcode == 0x9) // Ping
+                        {
+                            SendPong(stream, payload);
+                        }
+                    }
+
+                    Console.ForegroundColor = ConsoleColor.Yellow;
+                    Console.WriteLine("[DISCONNECTED] Mobile tablet closed session: " + client.Client.RemoteEndPoint);
+                    Console.ResetColor();
+                }
+            }
+            catch { }
+            finally
+            {
+                try { client.Close(); } catch { }
+            }
+        }
+
+        private static void ReadExact(NetworkStream stream, byte[] buffer, int count)
+        {
+            int offset = 0;
+            while (offset < count)
+            {
+                int read = stream.Read(buffer, offset, count - offset);
+                if (read <= 0) throw new IOException("Connection terminated");
+                offset += read;
+            }
+        }
+
+        private static void ProcessJsonPacket(string json, NetworkStream stream)
+        {
+            try
+            {
+                if (json.Contains("\"ping\""))
+                {
+                    long now = DateTime.UtcNow.Ticks / 10000;
+                    SendWsTextMessage(stream, "{\"type\":\"pong\",\"timestamp\":" + now + "}");
+                    return;
+                }
+
+                string type = ExtractJsonString(json, "type", "pointerMove");
+                double x = ExtractJsonDouble(json, "x", 0.5);
+                double y = ExtractJsonDouble(json, "y", 0.5);
+                double pressure = ExtractJsonDouble(json, "pressure", 0.5);
+                string tool = ExtractJsonString(json, "tool", "pen");
+
+                InjectPointerInput(x, y, pressure, type, tool, false);
+            }
+            catch { }
+        }
+
+        private static void SendWsTextMessage(NetworkStream stream, string text)
+        {
+            try
+            {
+                byte[] raw = Encoding.UTF8.GetBytes(text);
+                byte[] frame = new byte[raw.Length + 2];
+                frame[0] = 0x81; // FIN + text
+                frame[1] = (byte)raw.Length;
+                Buffer.BlockCopy(raw, 0, frame, 2, raw.Length);
+                stream.Write(frame, 0, frame.Length);
+            }
+            catch { }
+        }
+
+        private static void SendPong(NetworkStream stream, byte[] payload)
+        {
+            try
+            {
+                byte[] frame = new byte[payload.Length + 2];
+                frame[0] = 0x8A; // FIN + pong
+                frame[1] = (byte)payload.Length;
+                Buffer.BlockCopy(payload, 0, frame, 2, payload.Length);
+                stream.Write(frame, 0, frame.Length);
+            }
+            catch { }
+        }
+
+        private static string ExtractJsonString(string json, string key, string defVal)
+        {
+            int idx = json.IndexOf("\"" + key + "\"");
+            if (idx == -1) return defVal;
+            int colon = json.IndexOf(":", idx);
+            if (colon == -1) return defVal;
+            int quoteStart = json.IndexOf("\"", colon);
+            if (quoteStart == -1) return defVal;
+            int quoteEnd = json.IndexOf("\"", quoteStart + 1);
+            if (quoteEnd == -1) return defVal;
+            return json.Substring(quoteStart + 1, quoteEnd - quoteStart - 1);
+        }
+
+        private static double ExtractJsonDouble(string json, string key, double defVal)
+        {
+            int idx = json.IndexOf("\"" + key + "\"");
+            if (idx == -1) return defVal;
+            int colon = json.IndexOf(":", idx);
+            if (colon == -1) return defVal;
+            int start = colon + 1;
+            while (start < json.Length && (json[start] == ' ' || json[start] == '\"')) start++;
+            int end = start;
+            while (end < json.Length && (char.IsDigit(json[end]) || json[end] == '.' || json[end] == '-')) end++;
+            if (end > start)
+            {
+                double v;
+                if (double.TryParse(json.Substring(start, end - start), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out v))
+                {
+                    return v;
+                }
+            }
+            return defVal;
+        }
+
+        private static string GetPrimaryLocalIp()
+        {
+            try
+            {
+                IPHostEntry host = Dns.GetHostEntry(Dns.GetHostName());
+                foreach (IPAddress ip in host.AddressList)
+                {
+                    if (ip.AddressFamily == AddressFamily.InterNetwork && !IPAddress.IsLoopback(ip))
+                    {
+                        string str = ip.ToString();
+                        if (str.StartsWith("192.168.") || str.StartsWith("10.") || str.StartsWith("172."))
+                        {
+                            return str;
+                        }
+                    }
+                }
+            }
+            catch { }
+            return "127.0.0.1";
+        }
+
+        private static void PrintConnectionInstructions()
+        {
+            Console.WriteLine();
+            Console.ForegroundColor = ConsoleColor.Cyan;
+            Console.WriteLine("================================================================================");
+            Console.WriteLine("          AIR CANVAS WINDOWS SERVER - CONNECTION INSTRUCTIONS                   ");
+            Console.WriteLine("================================================================================");
+            Console.ResetColor();
+
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine("[STATUS] Actively Listening on TCP Port {0} (WebSocket) & Port {1} (UDP)", DEFAULT_PORT, DISCOVERY_PORT);
+            Console.ResetColor();
+            Console.WriteLine();
+
+            Console.ForegroundColor = ConsoleColor.White;
+            Console.WriteLine("METHOD 1: WI-FI / LOCAL NETWORK (Mobile & PC on same Wi-Fi)");
+            Console.ResetColor();
+            Console.WriteLine("  Local IP addresses found on this PC:");
+            try
+            {
+                IPHostEntry host = Dns.GetHostEntry(Dns.GetHostName());
+                bool found = false;
+                foreach (IPAddress ip in host.AddressList)
+                {
+                    if (ip.AddressFamily == AddressFamily.InterNetwork)
+                    {
+                        found = true;
+                        Console.ForegroundColor = ConsoleColor.Cyan;
+                        Console.WriteLine("   -> IP: {0}  (Port: {1})", ip, DEFAULT_PORT);
+                        Console.ResetColor();
+                    }
+                }
+                if (!found)
+                {
+                    Console.WriteLine("   -> IP: 127.0.0.1  (Port: {0})", DEFAULT_PORT);
+                }
+            }
+            catch { }
+            Console.WriteLine("  * In your phone app, enter one of the IPs above, or tap 'Auto-Detect PC'.");
+            Console.WriteLine();
+
+            Console.ForegroundColor = ConsoleColor.White;
+            Console.WriteLine("METHOD 2: USB CABLE (Ultra-Low Latency, Zero Lag)");
+            Console.ResetColor();
+            Console.WriteLine("  1. Connect your Android phone to PC with a USB cable (enable USB Debugging).");
+            Console.WriteLine("  2. Open Command Prompt on PC and run:");
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.WriteLine("     adb reverse tcp:{0} tcp:{0}", DEFAULT_PORT);
+            Console.ResetColor();
+            Console.WriteLine("  3. In the phone app, tap: [USB Cable (127.0.0.1:9090)] to connect!");
+            Console.WriteLine();
+
+            Console.ForegroundColor = ConsoleColor.White;
+            Console.WriteLine("FIREWALL TROUBLESHOOTING:");
+            Console.ResetColor();
+            Console.WriteLine("  If your phone cannot connect, Windows Firewall may be blocking Port {0}.", DEFAULT_PORT);
+            Console.WriteLine("  Run 'Fix_Firewall.bat' as Administrator to instantly unblock Port {0}.", DEFAULT_PORT);
+            Console.WriteLine("================================================================================");
+            Console.WriteLine();
+        }
+
         public static void Main(string[] args)
         {
             Console.Title = "Air Canvas Windows Server v" + VERSION;
@@ -649,21 +1024,31 @@ namespace AirCanvas.Server
             // 3. Execute self-diagnostic verification test
             RunDpiDiagnosticTests();
 
+            // 4. Start RFC 6455 WebSocket Server on Port 9090
+            StartWebSocketServer();
+
+            // 5. Start UDP Auto-Discovery Beacon on Port 9091
+            StartUdpDiscovery();
+
+            // 6. Print connection instructions and IPs clearly
+            PrintConnectionInstructions();
+
             Console.ForegroundColor = ConsoleColor.White;
-            Console.WriteLine("Air Canvas Windows Server is active and listening for mobile tablet strokes.");
-            Console.WriteLine("Press 'T' to run diagnostic test, 'C' to clear, or 'Q' to quit.\n");
+            Console.WriteLine("Air Canvas is READY! Connect your phone/tablet now.");
+            Console.WriteLine("Commands: [T] Run Diagnostic Test  |  [C] Clear Screen  |  [Q] Quit Server\n");
             Console.ResetColor();
 
             // Start interactive loop
-            bool running = true;
-            while (running)
+            while (_isRunning)
             {
                 if (Console.KeyAvailable)
                 {
                     var key = Console.ReadKey(true).Key;
                     if (key == ConsoleKey.Q)
                     {
-                        running = false;
+                        _isRunning = false;
+                        try { _tcpListener?.Stop(); } catch { }
+                        try { _udpListener?.Close(); } catch { }
                     }
                     else if (key == ConsoleKey.T)
                     {
@@ -673,9 +1058,10 @@ namespace AirCanvas.Server
                     else if (key == ConsoleKey.C)
                     {
                         Console.Clear();
+                        PrintConnectionInstructions();
                     }
                 }
-                Thread.Sleep(100);
+                Thread.Sleep(50);
             }
         }
     }

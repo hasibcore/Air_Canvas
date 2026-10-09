@@ -1,7 +1,7 @@
 @echo off
 :: AIRCanvas Windows Firewall Rule Setup
-:: Grants permission for TCP Port 9090 and ADB reverse connections
-echo Configuring Windows Defender Firewall for AIRCanvas Server (Port 9090)...
+:: Grants permission for TCP Port 9090, UDP 9091, and ADB reverse connections
+echo Configuring Windows Defender Firewall for AIRCanvas Server...
 net session >nul 2>&1
 if %errorLevel% neq 0 (
     echo [REQUESTING ADMIN PRIVILEGES]
@@ -11,11 +11,20 @@ if %errorLevel% neq 0 (
 
 netsh advfirewall firewall delete rule name="AIRCanvas Server Port 9090" >nul 2>&1
 netsh advfirewall firewall add rule name="AIRCanvas Server Port 9090" dir=in action=allow protocol=TCP localport=9090 profile=any
+
+netsh advfirewall firewall delete rule name="AIRCanvas Discovery Port 9091" >nul 2>&1
+netsh advfirewall firewall add rule name="AIRCanvas Discovery Port 9091" dir=in action=allow protocol=UDP localport=9091 profile=any
+
+netsh advfirewall firewall delete rule name="AIRCanvas Server App" >nul 2>&1
 netsh advfirewall firewall add rule name="AIRCanvas Server App" dir=in action=allow program="%~dp0AirCanvas.exe" enable=yes profile=any
+
+netsh advfirewall firewall delete rule name="AIRCanvasServer App" >nul 2>&1
+netsh advfirewall firewall add rule name="AIRCanvasServer App" dir=in action=allow program="%~dp0AirCanvasServer.exe" enable=yes profile=any
 
 echo.
 echo ===================================================================
 echo [SUCCESS] Windows Defender Firewall configured for AIRCanvas!
-echo Inbound TCP Port 9090 is allowed across Private, Domain, and Public.
+echo Inbound TCP Port 9090 and UDP Port 9091 are allowed across all profiles.
+echo Both Wi-Fi, Ethernet, and USB connections can now connect!
 echo ===================================================================
 timeout /t 3 >nul

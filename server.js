@@ -2,6 +2,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { WebSocketServer, WebSocket } from 'ws';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -98,6 +99,90 @@ const server = http.createServer((req, res) => {
   send404(res);
 });
 
+// WebSocket Room Relay for Instant QR Code & Multi-Device Pairing
+const wss = new WebSocketServer({ server });
+const rooms = new Map();
+
+wss.on('connection', (ws, req) => {
+  let pin = '1234';
+  let role = 'client';
+
+  try {
+    const parsedUrl = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+    pin = parsedUrl.searchParams.get('pin') || '1234';
+    role = parsedUrl.searchParams.get('role') || 'client';
+  } catch { }
+
+  if (!rooms.has(pin)) {
+    rooms.set(pin, new Set());
+  }
+  const room = rooms.get(pin);
+  room.add(ws);
+
+  console.log(`[WebSocket] Client joined Room PIN: ${pin} (${role}). Total in room: ${room.size}`);
+
+  // Send welcome confirmation with peer count
+  try {
+    ws.send(JSON.stringify({
+      type: 'room_joined',
+      pin,
+      role,
+      peerCount: room.size,
+      timestamp: Date.now()
+    }));
+  } catch { }
+
+  // Notify existing peers
+  for (const peer of room) {
+    if (peer !== ws && peer.readyState === WebSocket.OPEN) {
+      try {
+        peer.send(JSON.stringify({
+          type: 'peer_connected',
+          role,
+          peerCount: room.size,
+          timestamp: Date.now()
+        }));
+      } catch { }
+    }
+  }
+
+  // Relay messages between peers in the same PIN room
+  ws.on('message', (data, isBinary) => {
+    for (const peer of room) {
+      if (peer !== ws && peer.readyState === WebSocket.OPEN) {
+        try {
+          peer.send(data, { binary: isBinary });
+        } catch { }
+      }
+    }
+  });
+
+  ws.on('close', () => {
+    room.delete(ws);
+    console.log(`[WebSocket] Client left Room PIN: ${pin}. Remaining: ${room.size}`);
+    if (room.size === 0) {
+      rooms.delete(pin);
+    } else {
+      for (const peer of room) {
+        if (peer.readyState === WebSocket.OPEN) {
+          try {
+            peer.send(JSON.stringify({
+              type: 'peer_disconnected',
+              peerCount: room.size,
+              timestamp: Date.now()
+            }));
+          } catch { }
+        }
+      }
+    }
+  });
+
+  ws.on('error', (err) => {
+    console.error(`[WebSocket Error]:`, err.message);
+  });
+});
+
 server.listen(PORT, HOST, () => {
   console.log(`[Air Canvas] Production server listening on http://${HOST}:${PORT}`);
+  console.log(`[Air Canvas] WebSocket Room Relay active on ws://${HOST}:${PORT}`);
 });

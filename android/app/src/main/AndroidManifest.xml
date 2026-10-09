@@ -15,7 +15,8 @@
         android:label="Air Canvas"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
-        android:hardwareAccelerated="true">
+        android:hardwareAccelerated="true"
+        android:usesCleartextTraffic="true">
 
         <!-- CRITICAL FIX: Force sensorLandscape on MainActivity to eliminate portrait-to-landscape
              in-flight dimension flipping during initial layout / LayoutBuilder sampling. -->
