@@ -22,9 +22,9 @@ export const InstallApkModal: React.FC<InstallApkModalProps> = ({ isOpen, onClos
   const [qrDataUrl, setQrDataUrl] = useState<string>('');
 
   const apkDirectUrl =
-    'https://github.com/hasibcore/Air_Canvas/releases/download/v1.7.6/AirCanvas-release.apk';
+    'https://github.com/hasibcore/Air_Canvas/releases/download/v1.7.7/AirCanvas-release.apk';
   const windowsDirectUrl =
-    'https://github.com/hasibcore/Air_Canvas/releases/download/v1.7.6/AirCanvas-Windows-x64.zip';
+    'https://github.com/hasibcore/Air_Canvas/releases/download/v1.7.7/AirCanvas-Windows-x64.zip';
   const localApkUrl = '/downloads/AirCanvas-release.apk';
 
   useEffect(() => {

@@ -277,6 +277,16 @@ export class ConnectionManager {
         socket.onmessage = (ev) => {
           this.processIncomingSocketData(ev.data);
         };
+
+        socket.onerror = () => {
+          // Safe fallback: do not crash in standalone/isolated sandbox
+        };
+
+        socket.onclose = () => {
+          if (this.ws === socket) {
+            this.ws = null;
+          }
+        };
       } catch (err) {
         console.warn('WebSocket relay error', err);
       }
@@ -503,6 +513,10 @@ export class ConnectionManager {
 
         socket.onmessage = (ev) => {
           this.processIncomingSocketData(ev.data);
+        };
+
+        socket.onerror = () => {
+          // Graceful fallback for offline or unreachable host in sandbox
         };
 
         socket.onclose = () => {

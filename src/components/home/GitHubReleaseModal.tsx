@@ -43,13 +43,13 @@ export const GitHubReleaseModal: React.FC<GitHubReleaseModalProps> = ({ isOpen, 
 
   const pushCommand = `git remote set-url origin ${targetRemote}
 git push -u origin main
-git push origin v1.7.6`;
+git push origin v1.7.7`;
 
   const tokenPushCommand = patToken.trim()
     ? `git push https://${patToken.trim()}@github.com/${cleanRepo}.git main
-git push https://${patToken.trim()}@github.com/${cleanRepo}.git v1.7.6`
+git push https://${patToken.trim()}@github.com/${cleanRepo}.git v1.7.7`
     : `git push https://<YOUR_GITHUB_PERSONAL_ACCESS_TOKEN>@github.com/${cleanRepo}.git main
-git push https://<YOUR_GITHUB_PERSONAL_ACCESS_TOKEN>@github.com/${cleanRepo}.git v1.7.6`;
+git push https://<YOUR_GITHUB_PERSONAL_ACCESS_TOKEN>@github.com/${cleanRepo}.git v1.7.7`;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm animate-in fade-in duration-200">
@@ -64,7 +64,7 @@ git push https://<YOUR_GITHUB_PERSONAL_ACCESS_TOKEN>@github.com/${cleanRepo}.git
               <div className="flex items-center gap-2">
                 <h3 className="text-lg font-bold text-white">GitHub Push & Release</h3>
                 <span className="px-2 py-0.5 rounded-full text-[10px] font-mono font-bold bg-cyan-500/20 text-cyan-300 border border-cyan-500/30">
-                  v1.7.6
+                  v1.7.7
                 </span>
               </div>
               <p className="text-xs text-slate-400 mt-0.5">
