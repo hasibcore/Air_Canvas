@@ -155,8 +155,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          tag_name: ${{ (github.ref_type == 'tag' && github.ref_name) || 'v1.7.3' }}
-          name: AirCanvas ${{ (github.ref_type == 'tag' && github.ref_name) || 'v1.7.3' }} - Wireless Graphics Tablet
+          tag_name: ${{ (github.ref_type == 'tag' && github.ref_name) || 'v1.7.4' }}
+          name: AirCanvas ${{ (github.ref_type == 'tag' && github.ref_name) || 'v1.7.4' }} - Wireless Graphics Tablet
           files: |
             release-assets/*
           draft: false
