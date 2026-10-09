@@ -371,6 +371,46 @@ class _TabletScreenState extends State<TabletScreen> {
     }
   }
 
+  Future<String?> _scanSubnetForPc(int port) async {
+    try {
+      String? localIp;
+      for (final interface in await NetworkInterface.list()) {
+        for (final addr in interface.addresses) {
+          if (addr.type == InternetAddressType.IPv4 && !addr.isLoopback) {
+            localIp = addr.address;
+            break;
+          }
+        }
+        if (localIp != null) break;
+      }
+
+      final candidates = <String>[];
+      if (localIp != null) {
+        final parts = localIp.split('.');
+        if (parts.length == 4) {
+          final prefix = '${parts[0]}.${parts[1]}.${parts[2]}';
+          for (final end in [1, 2, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 150, 200]) {
+            candidates.add('$prefix.$end');
+          }
+          candidates.add('192.168.43.1');
+          candidates.add('192.168.1.100');
+          candidates.add('192.168.1.105');
+          candidates.add('192.168.0.100');
+          candidates.add('192.168.0.105');
+        }
+      }
+
+      for (final targetIp in candidates.toSet()) {
+        try {
+          final s = await Socket.connect(targetIp, port, timeout: const Duration(milliseconds: 250));
+          s.destroy();
+          return targetIp;
+        } catch (_) {}
+      }
+    } catch (_) {}
+    return null;
+  }
+
   Future<void> _autoDiscoverPc() async {
     if (_isDiscovering) return;
     setState(() {
@@ -385,7 +425,7 @@ class _TabletScreenState extends State<TabletScreen> {
       udp.send(query, InternetAddress('255.255.255.255'), 9091);
 
       final completer = Completer<String?>();
-      Timer(const Duration(seconds: 3), () {
+      Timer(const Duration(seconds: 2), () {
         if (!completer.isCompleted) {
           try { udp.close(); } catch (_) {}
           completer.complete(null);
@@ -411,14 +451,23 @@ class _TabletScreenState extends State<TabletScreen> {
         }
       });
 
-      final discoveredIp = await completer.future;
+      String? discoveredIp = await completer.future;
+
+      // Fallback: If UDP broadcast was blocked by router, scan subnet directly on TCP port
+      if (discoveredIp == null || discoveredIp.isEmpty) {
+        setState(() {
+          _connectionStatus = 'Probing local Wi-Fi subnet for PC (Port $_serverPort)...';
+        });
+        discoveredIp = await _scanSubnetForPc(_serverPort);
+      }
+
       setState(() {
         _isDiscovering = false;
       });
 
       if (discoveredIp != null && discoveredIp.isNotEmpty) {
         setState(() {
-          _serverIp = discoveredIp;
+          _serverIp = discoveredIp!;
           _connectionMode = 'wifi';
         });
         ScaffoldMessenger.of(context).showSnackBar(
@@ -433,9 +482,9 @@ class _TabletScreenState extends State<TabletScreen> {
       } else {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('Could not auto-detect PC. Enter IP manually or try USB cable mode.'),
+            content: Text('Could not auto-detect PC. Ensure AirCanvasServer.exe is running on PC, or try USB Cable mode.'),
             backgroundColor: Color(0xFFEF4444),
-            duration: Duration(seconds: 3),
+            duration: Duration(seconds: 4),
           ),
         );
       }
@@ -493,6 +542,23 @@ class _TabletScreenState extends State<TabletScreen> {
           final int now = DateTime.now().millisecondsSinceEpoch;
           setState(() {
             _latencyMs = ((now - sentTime) / 2.0).clamp(0.5, 999.0);
+          });
+        } else if (map['type'] == 'room_joined') {
+          final int peerCount = map['peerCount'] ?? 1;
+          setState(() {
+            if (peerCount > 1) {
+              _connectionStatus = 'Paired with PC Host! (Ready to Draw)';
+            } else {
+              _connectionStatus = 'Waiting for PC Host (Room PIN: $_pairingPin)...';
+            }
+          });
+        } else if (map['type'] == 'peer_connected') {
+          setState(() {
+            _connectionStatus = 'PC Host Paired! Streaming Ready';
+          });
+        } else if (map['type'] == 'peer_disconnected') {
+          setState(() {
+            _connectionStatus = 'PC Host disconnected from PIN room';
           });
         }
       } catch (_) {}
@@ -851,6 +917,38 @@ class _TabletScreenState extends State<TabletScreen> {
                               ],
                             ),
                           ),
+                          const SizedBox(height: 8),
+                          InkWell(
+                            onTap: () async {
+                              try {
+                                final s = await Socket.connect('127.0.0.1', int.tryParse(portController.text) ?? 9090, timeout: const Duration(seconds: 1));
+                                s.destroy();
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(content: Text('✅ USB Port 9090 is READY! Tap Connect USB below.'), backgroundColor: Color(0xFF10B981)),
+                                );
+                              } catch (_) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(content: Text('❌ Port 9090 not reachable on USB. Run "adb reverse tcp:9090 tcp:9090" on PC.'), backgroundColor: Color(0xFFEF4444)),
+                                );
+                              }
+                            },
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 10),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFF00E5FF).withOpacity(0.15),
+                                borderRadius: BorderRadius.circular(8),
+                                border: Border.all(color: const Color(0xFF00E5FF).withOpacity(0.4)),
+                              ),
+                              child: const Row(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  Icon(Icons.bolt, color: Color(0xFF00E5FF), size: 14),
+                                  SizedBox(width: 6),
+                                  Text('⚡ Test USB Port 9090 Now', style: TextStyle(color: Color(0xFF00E5FF), fontWeight: FontWeight.bold, fontSize: 11)),
+                                ],
+                              ),
+                            ),
+                          ),
                           const SizedBox(height: 6),
                           const Text('3. Then tap "Connect USB" below!', style: TextStyle(color: Colors.white70, fontSize: 11)),
                         ],
@@ -1199,8 +1297,8 @@ class _TabletScreenState extends State<TabletScreen> {
                             const SizedBox(width: 8),
                             Text(
                               _isConnected
-                                  ? 'Connected (${_latencyMs > 0 ? "${_latencyMs.toStringAsFixed(1)}ms" : "<1ms"})'
-                                  : (_isConnecting ? 'Connecting...' : 'Tap to Connect PC'),
+                                  ? 'Connected (${_connectionMode.toUpperCase()} ${_latencyMs > 0 ? "${_latencyMs.toStringAsFixed(1)}ms" : "<1ms"})'
+                                  : (_isConnecting ? 'Connecting...' : (_connectionStatus.contains('failed') ? _connectionStatus : 'Tap to Connect PC')),
                               style: const TextStyle(
                                 color: Colors.white,
                                 fontSize: 11,

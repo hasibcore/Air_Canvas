@@ -32,6 +32,7 @@ import { QRCodeCard } from './QRCodeCard.tsx';
 import { QRScannerModal } from './QRScannerModal.tsx';
 import { GitHubReleaseModal } from './GitHubReleaseModal.tsx';
 import { InstallApkModal } from './InstallApkModal.tsx';
+import { ConnectionDoctorModal } from './ConnectionDoctorModal.tsx';
 import { DpiDiagnosticModal } from '../drawing/DpiDiagnosticModal.tsx';
 import { LicenseService } from '../../services/licenseService.ts';
 import { Crown, Zap, ShieldCheck, Database } from 'lucide-react';
@@ -65,6 +66,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
   const [showDpiModal, setShowDpiModal] = useState(false);
   const [showGitHubModal, setShowGitHubModal] = useState(false);
   const [showInstallApkModal, setShowInstallApkModal] = useState(false);
+  const [showDoctorModal, setShowDoctorModal] = useState(false);
 
   // Manual connect state
   const [manualIp, setManualIp] = useState('192.168.1.105');
@@ -156,7 +158,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
             <div className="flex items-center gap-2">
               <h1 className="text-2xl font-black tracking-tight text-white font-sans">Air Canvas</h1>
               <span className="text-[10px] px-2 py-0.5 rounded-full bg-cyan-500/15 text-cyan-300 border border-cyan-500/30 font-bold">
-                v1.7.5 PRO
+                v1.7.6 PRO
               </span>
             </div>
             <p className="text-xs text-slate-400 font-medium">Wireless Graphics Tablet & Digital Drawing Studio</p>
@@ -181,10 +183,25 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
             </button>
           )}
 
-          <div className="hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-800 text-xs text-slate-300">
+          <button
+            type="button"
+            onClick={() => setShowDoctorModal(true)}
+            className="hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-800 hover:border-emerald-500/40 text-xs text-slate-300 transition-colors cursor-pointer"
+            title="Click to check or edit your PC IP address"
+          >
             <Wifi className="w-3.5 h-3.5 text-emerald-400" />
             <span>Local IP: <strong className="text-slate-100 font-mono">{connection.localIp}:{connection.serverPort}</strong></span>
-          </div>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setShowDoctorModal(true)}
+            className="px-3 py-1.5 rounded-xl bg-gradient-to-r from-emerald-500/15 to-cyan-500/15 hover:from-emerald-500/25 hover:to-cyan-500/25 border border-emerald-500/30 text-emerald-300 hover:text-white transition-all flex items-center gap-1.5 text-xs font-bold shadow-sm"
+            title="Interactive Step-by-Step Connection Troubleshooter (Wi-Fi, USB, QR)"
+          >
+            <Zap className="w-4 h-4 text-emerald-400" />
+            <span>Connection Doctor</span>
+          </button>
 
           {onOpenBridge && (
             <button
@@ -1167,6 +1184,14 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
       <InstallApkModal
         isOpen={showInstallApkModal}
         onClose={() => setShowInstallApkModal(false)}
+      />
+
+      {/* Connection Doctor & Troubleshooting Modal */}
+      <ConnectionDoctorModal
+        isOpen={showDoctorModal}
+        onClose={() => setShowDoctorModal(false)}
+        connection={connection}
+        onOpenDrawingScreen={onOpenDrawingScreen}
       />
     </div>
   );
