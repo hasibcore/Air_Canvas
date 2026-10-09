@@ -1047,8 +1047,8 @@ namespace AirCanvas.Server
                     if (key == ConsoleKey.Q)
                     {
                         _isRunning = false;
-                        try { _tcpListener?.Stop(); } catch { }
-                        try { _udpListener?.Close(); } catch { }
+                        try { if (_tcpListener != null) _tcpListener.Stop(); } catch { }
+                        try { if (_udpListener != null) _udpListener.Close(); } catch { }
                     }
                     else if (key == ConsoleKey.T)
                     {
