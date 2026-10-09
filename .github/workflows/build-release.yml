@@ -86,8 +86,7 @@ jobs:
           if 'android.permission.INTERNET' not in content:
               content = content.replace('<application', perms + '    <application')
           if 'android:usesCleartextTraffic' not in content:
-              content = content.replace('<application', '<application
-        android:usesCleartextTraffic="true"')
+              content = content.replace('<application', '<application android:usesCleartextTraffic=\\'true\\'')
           with open(p, 'w') as f: f.write(content)
           print('Updated AndroidManifest with network permissions and usesCleartextTraffic successfully.')
           "
