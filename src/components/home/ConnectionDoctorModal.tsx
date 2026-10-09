@@ -49,7 +49,7 @@ export const ConnectionDoctorModal: React.FC<ConnectionDoctorModalProps> = ({
   }, [isOpen, connection.localIp]);
 
   const generateQr = (ip: string) => {
-    const targetUrl = `aircanvas://connect?ip=${encodeURIComponent(ip)}&port=${connection.serverPort}&pin=${connection.pairingPin}`;
+    const targetUrl = connection.getConnectionString('web', ip);
     QRCode.toDataURL(targetUrl, {
       width: 320,
       margin: 2,

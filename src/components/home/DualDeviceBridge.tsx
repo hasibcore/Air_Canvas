@@ -157,6 +157,41 @@ export const DualDeviceBridge: React.FC<DualDeviceBridgeProps> = ({
     };
   }, [mobileEngine, pcEngine, activeDpi, connection]);
 
+  // Wire incoming input stream from real paired external tablet device
+  useEffect(() => {
+    const prevHandler = connection.onInputReceived;
+    connection.onInputReceived = (event: InputEventData) => {
+      // Mirror onto both mobile and PC canvases
+      pcEngine.handleIncomingInputEvent(event);
+      mobileEngine.handleIncomingInputEvent(event);
+
+      const targetX = Math.round(event.x * (pcWidth - 1));
+      const targetY = Math.round(event.y * (pcHeight - 1));
+
+      setLastTouchTelemetry(
+        `[Real Tablet Input] (${event.x.toFixed(4)}, ${event.y.toFixed(4)}) -> [PC Display] ${pcWidth}x${pcHeight} -> (${targetX}, ${targetY})`
+      );
+
+      setPcCursor({ x: targetX, y: targetY });
+      setMobileCursor({
+        x: event.x * mobileEngine.canvasWidth,
+        y: event.y * mobileEngine.canvasHeight,
+        normX: event.x,
+        normY: event.y,
+      });
+
+      if (Math.abs(event.x - 0.5) < 0.015 && Math.abs(event.y - 0.5) < 0.015) {
+        setHitCenter(true);
+      } else {
+        setHitCenter(false);
+      }
+    };
+
+    return () => {
+      connection.onInputReceived = prevHandler;
+    };
+  }, [connection, pcEngine, mobileEngine, activeDpi]);
+
   // Sync brush color
   const handleColorChange = (color: string) => {
     setActiveColor(color);

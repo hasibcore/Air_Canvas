@@ -32,11 +32,23 @@ export const QRCodeCard: React.FC<QRCodeCardProps> = ({ connection, onConnectSel
   const [qrDataUrl, setQrDataUrl] = useState<string>('');
   const [isGenerating, setIsGenerating] = useState(false);
 
+  // Sync customHost with detected local IP
+  useEffect(() => {
+    setCustomHost(connection.localIp);
+  }, [connection.localIp]);
+
   // Determine effective host
   const getEffectiveHost = (): string => {
     if (hostChoice === 'local') return connection.localIp;
     if (hostChoice === 'origin') {
-      return typeof window !== 'undefined' ? window.location.host : connection.localIp;
+      if (typeof window !== 'undefined') {
+        const h = window.location.hostname;
+        if (h === 'localhost' || h === '127.0.0.1' || h.startsWith('127.')) {
+          return connection.localIp;
+        }
+        return window.location.host;
+      }
+      return connection.localIp;
     }
     return customHost || connection.localIp;
   };

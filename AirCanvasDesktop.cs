@@ -1,51 +1,211 @@
+// ==============================================================================
+// AirCanvasDesktop.cs
+// Standalone Windows GUI Desktop Application & Local Asset Server
+// Native Pen Injector + Embedded Zero-Config Static Server + Edge App Mode Frame
+// ==============================================================================
+
 using System;
 using System.Diagnostics;
+using System.Drawing;
 using System.IO;
 using System.Net;
+using System.Net.Sockets;
+using System.Text;
 using System.Threading;
 using System.Windows.Forms;
+using AirCanvas.Server;
 
 namespace AirCanvas
 {
-    static class Program
+    public static class Program
     {
-        private static HttpListener _listener;
-        private static int _port = 3001;
+        private static TcpListener _httpListener;
+        private static int _httpPort = 3005;
         private static string _distDir;
+        private static NotifyIcon _trayIcon;
+        private static Process _appProcess;
 
         [STAThread]
-        static void Main()
+        public static void Main(string[] args)
         {
+            Application.EnableVisualStyles();
+            Application.SetCompatibleTextRenderingDefault(false);
+
             try
             {
                 string baseDir = AppDomain.CurrentDomain.BaseDirectory;
                 _distDir = Path.Combine(baseDir, "dist");
 
-                // 1. Launch native input receiver if present
-                string serverExe = Path.Combine(baseDir, "AirCanvasServer.exe");
-                if (File.Exists(serverExe) && Process.GetProcessesByName("AirCanvasServer").Length == 0)
+                // 1. Start Native Pen Digitizer Server in Background
+                new Thread(() =>
                 {
                     try
                     {
-                        Process.Start(new ProcessStartInfo
-                        {
-                            FileName = serverExe,
-                            WindowStyle = ProcessWindowStyle.Normal,
-                            UseShellExecute = true
-                        });
+                        AirCanvasServer.StartServerBackground();
                     }
-                    catch { }
-                }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine("[AirCanvasServer Error] " + ex.Message);
+                    }
+                })
+                { IsBackground = true }.Start();
 
-                // 2. Start embedded static HTTP server for production assets
+                // 2. Start Embedded Static HTTP Server via standard TcpListener (Zero-admin permissions required)
                 if (Directory.Exists(_distDir))
                 {
-                    StartStaticFileServer();
+                    StartEmbeddedHttpServer();
                 }
 
-                string url = "http://localhost:" + _port + "/";
+                // 3. Setup System Tray Icon
+                SetupSystemTray(baseDir);
 
-                // 3. Open in standalone Edge App window (Chromium application frame)
+                // 4. Open Standalone Desktop App Window
+                string targetUrl = "http://127.0.0.1:" + _httpPort + "/";
+                LaunchAppWindow(targetUrl);
+
+                // Keep Windows Form message pump alive
+                Application.Run();
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(
+                    "Error launching Air Canvas: " + ex.Message,
+                    "Air Canvas",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error
+                );
+            }
+        }
+
+        private static void StartEmbeddedHttpServer()
+        {
+            // Find free port between 3005 and 3050 and bind to IPAddress.Any for Wi-Fi mobile client access
+            for (int p = 3005; p <= 3050; p++)
+            {
+                try
+                {
+                    var listener = new TcpListener(IPAddress.Any, p);
+                    listener.Start();
+                    _httpListener = listener;
+                    _httpPort = p;
+                    new Thread(HttpListenLoop) { IsBackground = true }.Start();
+                    break;
+                }
+                catch
+                {
+                    // Port in use, try next
+                }
+            }
+        }
+
+        private static void HttpListenLoop()
+        {
+            while (_httpListener != null)
+            {
+                try
+                {
+                    TcpClient client = _httpListener.AcceptTcpClient();
+                    ThreadPool.QueueUserWorkItem((state) => HandleClientHttpRequest((TcpClient)state), client);
+                }
+                catch
+                {
+                    break;
+                }
+            }
+        }
+
+        private static void HandleClientHttpRequest(TcpClient client)
+        {
+            try
+            {
+                using (client)
+                using (NetworkStream stream = client.GetStream())
+                {
+                    byte[] buffer = new byte[8192];
+                    int bytesRead = stream.Read(buffer, 0, buffer.Length);
+                    if (bytesRead <= 0) return;
+
+                    string requestText = Encoding.UTF8.GetString(buffer, 0, bytesRead);
+                    string[] lines = requestText.Split(new[] { "\r\n" }, StringSplitOptions.None);
+                    if (lines.Length == 0) return;
+
+                    string[] requestLine = lines[0].Split(' ');
+                    if (requestLine.Length < 2) return;
+
+                    string rawPath = requestLine[1].Split('?')[0].TrimStart('/');
+
+                    // LAN Discovery / Network-Info Endpoint for Mobile Pair Detection
+                    if (rawPath == "api/network-info" || rawPath == "api/ip")
+                    {
+                        string primaryIp = AirCanvasServer.GetPrimaryLocalIp();
+                        string json = "{\"ip\":\"" + primaryIp + "\",\"allIps\":[\"" + primaryIp + "\"],\"webPort\":" + _httpPort + ",\"serverPort\":9090,\"pin\":\"1234\"}";
+                        byte[] jsonBytes = Encoding.UTF8.GetBytes(json);
+                        string header = "HTTP/1.1 200 OK\r\n" +
+                                        "Content-Type: application/json; charset=utf-8\r\n" +
+                                        "Content-Length: " + jsonBytes.Length + "\r\n" +
+                                        "Access-Control-Allow-Origin: *\r\n" +
+                                        "Connection: close\r\n\r\n";
+                        byte[] hBytes = Encoding.UTF8.GetBytes(header);
+                        stream.Write(hBytes, 0, hBytes.Length);
+                        stream.Write(jsonBytes, 0, jsonBytes.Length);
+                        return;
+                    }
+
+                    if (string.IsNullOrEmpty(rawPath)) rawPath = "index.html";
+
+                    string localPath = Path.Combine(_distDir, rawPath.Replace('/', Path.DirectorySeparatorChar));
+
+                    // Single Page Application (SPA) routing fallback
+                    if (!File.Exists(localPath))
+                    {
+                        localPath = Path.Combine(_distDir, "index.html");
+                    }
+
+                    if (File.Exists(localPath))
+                    {
+                        byte[] fileBytes = File.ReadAllBytes(localPath);
+                        string ext = Path.GetExtension(localPath).ToLowerInvariant();
+                        string contentType = "application/octet-stream";
+
+                        if (ext == ".html") contentType = "text/html; charset=utf-8";
+                        else if (ext == ".js" || ext == ".mjs") contentType = "application/javascript; charset=utf-8";
+                        else if (ext == ".css") contentType = "text/css; charset=utf-8";
+                        else if (ext == ".svg") contentType = "image/svg+xml";
+                        else if (ext == ".png") contentType = "image/png";
+                        else if (ext == ".jpg" || ext == ".jpeg") contentType = "image/jpeg";
+                        else if (ext == ".json") contentType = "application/json";
+                        else if (ext == ".ico") contentType = "image/x-icon";
+                        else if (ext == ".woff2") contentType = "font/woff2";
+                        else if (ext == ".woff") contentType = "font/woff";
+                        else if (ext == ".apk") contentType = "application/vnd.android.package-archive";
+                        else if (ext == ".zip") contentType = "application/zip";
+
+                        string header = "HTTP/1.1 200 OK\r\n" +
+                                        "Content-Type: " + contentType + "\r\n" +
+                                        "Content-Length: " + fileBytes.Length + "\r\n" +
+                                        "Connection: close\r\n" +
+                                        "Access-Control-Allow-Origin: *\r\n\r\n";
+
+                        byte[] headerBytes = Encoding.UTF8.GetBytes(header);
+                        stream.Write(headerBytes, 0, headerBytes.Length);
+                        stream.Write(fileBytes, 0, fileBytes.Length);
+                    }
+                    else
+                    {
+                        string notFound = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                        byte[] notFoundBytes = Encoding.UTF8.GetBytes(notFound);
+                        stream.Write(notFoundBytes, 0, notFoundBytes.Length);
+                    }
+                }
+            }
+            catch { }
+        }
+
+        private static void LaunchAppWindow(string url)
+        {
+            try
+            {
+                // Prefer Microsoft Edge in frameless Standalone App mode
                 string edgePath = @"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe";
                 if (!File.Exists(edgePath))
                 {
@@ -54,107 +214,81 @@ namespace AirCanvas
 
                 if (File.Exists(edgePath))
                 {
-                    Process.Start(new ProcessStartInfo
+                    var psi = new ProcessStartInfo
                     {
                         FileName = edgePath,
-                        Arguments = "--app=\"" + url + "\" --window-size=1280,850",
+                        Arguments = "--app=\"" + url + "\" --window-size=1360,860",
                         UseShellExecute = true
-                    });
+                    };
+                    _appProcess = Process.Start(psi);
+                    return;
                 }
-                else
+
+                // Check Google Chrome as fallback
+                string chromePath = @"C:\Program Files\Google\Chrome\Application\chrome.exe";
+                if (!File.Exists(chromePath))
                 {
-                    Process.Start(new ProcessStartInfo
+                    chromePath = @"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe";
+                }
+
+                if (File.Exists(chromePath))
+                {
+                    var psi = new ProcessStartInfo
                     {
-                        FileName = url,
+                        FileName = chromePath,
+                        Arguments = "--app=\"" + url + "\" --window-size=1360,860",
                         UseShellExecute = true
-                    });
+                    };
+                    _appProcess = Process.Start(psi);
+                    return;
                 }
+
+                // Default system browser fallback
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = url,
+                    UseShellExecute = true
+                });
             }
-            catch (Exception ex)
-            {
-                MessageBox.Show("Error launching Air Canvas: " + ex.Message, "Air Canvas Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            }
+            catch { }
         }
 
-        static void StartStaticFileServer()
-        {
-            for (int p = 3001; p <= 3020; p++)
-            {
-                try
-                {
-                    var listener = new HttpListener();
-                    listener.Prefixes.Add("http://localhost:" + p + "/");
-                    listener.Prefixes.Add("http://127.0.0.1:" + p + "/");
-                    listener.Start();
-                    _listener = listener;
-                    _port = p;
-                    new Thread(ListenLoop) { IsBackground = true }.Start();
-                    break;
-                }
-                catch
-                {
-                    // Port might already be bound, try next
-                }
-            }
-        }
-
-        static void ListenLoop()
-        {
-            while (_listener != null && _listener.IsListening)
-            {
-                try
-                {
-                    HttpListenerContext ctx = _listener.GetContext();
-                    ThreadPool.QueueUserWorkItem((state) => HandleRequest(ctx));
-                }
-                catch { break; }
-            }
-        }
-
-        static void HandleRequest(HttpListenerContext ctx)
+        private static void SetupSystemTray(string baseDir)
         {
             try
             {
-                string rawUrl = ctx.Request.Url.AbsolutePath.TrimStart('/');
-                if (string.IsNullOrEmpty(rawUrl)) rawUrl = "index.html";
+                _trayIcon = new NotifyIcon();
+                _trayIcon.Text = "Air Canvas - Wireless Graphics Tablet";
 
-                string filePath = Path.Combine(_distDir, rawUrl.Replace('/', Path.DirectorySeparatorChar));
-
-                // SPA fallback for routing
-                if (!File.Exists(filePath))
+                // Load custom app icon if available
+                string icoPath = Path.Combine(baseDir, "app.ico");
+                if (File.Exists(icoPath))
                 {
-                    filePath = Path.Combine(_distDir, "index.html");
-                }
-
-                if (File.Exists(filePath))
-                {
-                    byte[] bytes = File.ReadAllBytes(filePath);
-                    string ext = Path.GetExtension(filePath).ToLowerInvariant();
-                    string mime = "application/octet-stream";
-                    if (ext == ".html") mime = "text/html; charset=utf-8";
-                    else if (ext == ".js") mime = "application/javascript";
-                    else if (ext == ".css") mime = "text/css";
-                    else if (ext == ".svg") mime = "image/svg+xml";
-                    else if (ext == ".png") mime = "image/png";
-                    else if (ext == ".jpg" || ext == ".jpeg") mime = "image/jpeg";
-                    else if (ext == ".json") mime = "application/json";
-                    else if (ext == ".ico") mime = "image/x-icon";
-                    else if (ext == ".woff2") mime = "font/woff2";
-
-                    ctx.Response.ContentType = mime;
-                    ctx.Response.ContentLength64 = bytes.Length;
-                    ctx.Response.OutputStream.Write(bytes, 0, bytes.Length);
+                    _trayIcon.Icon = new Icon(icoPath);
                 }
                 else
                 {
-                    ctx.Response.StatusCode = 404;
+                    _trayIcon.Icon = SystemIcons.Application;
                 }
+
+                var contextMenu = new ContextMenuStrip();
+                contextMenu.Items.Add("🎨 Open Drawing Studio", null, (s, e) => LaunchAppWindow("http://127.0.0.1:" + _httpPort + "/?view=studio"));
+                contextMenu.Items.Add("📱 Open Tablet Mode", null, (s, e) => LaunchAppWindow("http://127.0.0.1:" + _httpPort + "/?view=tablet"));
+                contextMenu.Items.Add("🌉 Dual-Device Bridge", null, (s, e) => LaunchAppWindow("http://127.0.0.1:" + _httpPort + "/?view=bridge"));
+                contextMenu.Items.Add(new ToolStripSeparator());
+                contextMenu.Items.Add("❌ Exit Air Canvas", null, (s, e) =>
+                {
+                    try { _trayIcon.Visible = false; } catch { }
+                    try { if (_httpListener != null) _httpListener.Stop(); } catch { }
+                    Application.Exit();
+                    Environment.Exit(0);
+                });
+
+                _trayIcon.ContextMenuStrip = contextMenu;
+                _trayIcon.DoubleClick += (s, e) => LaunchAppWindow("http://127.0.0.1:" + _httpPort + "/");
+                _trayIcon.Visible = true;
             }
             catch { }
-            finally
-            {
-                try { ctx.Response.OutputStream.Close(); } catch { }
-            }
         }
     }
 }

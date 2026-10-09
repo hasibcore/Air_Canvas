@@ -23,7 +23,16 @@ import { CloudSubscriptionModal } from './components/licensing/CloudSubscription
 import { Crown, Sparkles, Database } from 'lucide-react';
 
 export function App() {
-  const [view, setView] = useState<'home' | 'tablet' | 'studio' | 'landing' | 'bridge'>('home');
+  const [view, setView] = useState<'home' | 'tablet' | 'studio' | 'landing' | 'bridge'>(() => {
+    if (typeof window !== 'undefined') {
+      const p = new URLSearchParams(window.location.search);
+      const v = p.get('view') || p.get('mode');
+      if (v === 'bridge' || v === 'tablet' || v === 'studio' || v === 'landing') {
+        return v as any;
+      }
+    }
+    return 'home';
+  });
   const [connection] = useState(() => ConnectionManager.getInstance());
   const [engine] = useState(() => DrawingEngine.getInstance());
   const [license] = useState(() => LicenseService.getInstance());

@@ -78,6 +78,7 @@ export class ConnectionManager {
   private constructor() {
     this.id = 'node_' + Math.random().toString(36).substring(2, 9);
     this.setupBroadcastChannel();
+    this.autoDetectLocalIp();
   }
 
   public static getInstance(): ConnectionManager {
@@ -257,36 +258,46 @@ export class ConnectionManager {
     this.pairingPin = pin;
     this.state = 'discovering';
 
-    // Connect to WebSocket Relay as host
+    // Connect to WebSocket Server (prefer direct native port 9090, fallback to web relay /ws)
     if (typeof window !== 'undefined') {
       try {
         if (this.ws) {
           this.ws.close();
           this.ws = null;
         }
-        const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const wsUrl = `${proto}//${window.location.host}/ws?pin=${encodeURIComponent(pin)}&role=host`;
-        const socket = new WebSocket(wsUrl);
-        socket.binaryType = 'arraybuffer';
-        this.ws = socket;
 
-        socket.onopen = () => {
-          console.log(`[Web Relay] Connected as Host for PIN: ${pin}`);
+        const connectSocket = (url: string, isFallback = false) => {
+          try {
+            const socket = new WebSocket(url);
+            socket.binaryType = 'arraybuffer';
+            this.ws = socket;
+
+            socket.onopen = () => {
+              console.log(`[Host WebSocket] Connected to ${url} for PIN: ${pin}`);
+            };
+
+            socket.onmessage = (ev) => {
+              this.processIncomingSocketData(ev.data);
+            };
+
+            socket.onerror = () => {
+              if (!isFallback && typeof window !== 'undefined') {
+                const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                const fallbackUrl = `${proto}//${window.location.host}/ws?pin=${encodeURIComponent(pin)}&role=host`;
+                connectSocket(fallbackUrl, true);
+              }
+            };
+
+            socket.onclose = () => {
+              if (this.ws === socket) {
+                this.ws = null;
+              }
+            };
+          } catch { }
         };
 
-        socket.onmessage = (ev) => {
-          this.processIncomingSocketData(ev.data);
-        };
-
-        socket.onerror = () => {
-          // Safe fallback: do not crash in standalone/isolated sandbox
-        };
-
-        socket.onclose = () => {
-          if (this.ws === socket) {
-            this.ws = null;
-          }
-        };
+        const primaryUrl = `ws://127.0.0.1:${this.serverPort}/aircanvas?pin=${encodeURIComponent(pin)}&role=host`;
+        connectSocket(primaryUrl);
       } catch (err) {
         console.warn('WebSocket relay error', err);
       }
@@ -489,41 +500,54 @@ export class ConnectionManager {
           this.ws = null;
         }
 
-        const isCloudRelay = ip === 'relay' || ip === 'cloud' || ip === window.location.hostname || ip.includes('.run.app');
+        const isCloudRelay = ip === 'relay' || ip === 'cloud' || ip.includes('.run.app') || ip.includes('.vercel.app') || ip.includes('.netlify.app');
         let wsUrl: string;
 
         if (isCloudRelay) {
           const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
           wsUrl = `${proto}//${window.location.host}/ws?pin=${encodeURIComponent(pin)}&role=client`;
         } else {
-          wsUrl = `ws://${ip}:${port}/aircanvas?pin=${encodeURIComponent(pin)}`;
+          wsUrl = `ws://${ip}:${port}/aircanvas?pin=${encodeURIComponent(pin)}&role=client`;
         }
 
-        const socket = new WebSocket(wsUrl);
-        socket.binaryType = 'arraybuffer';
-        this.ws = socket;
+        const connectClientSocket = (url: string, isFallback = false) => {
+          try {
+            const socket = new WebSocket(url);
+            socket.binaryType = 'arraybuffer';
+            this.ws = socket;
 
-        socket.onopen = () => {
-          this.state = 'connected';
-          const prefix = transport === 'usb' ? 'USB Cable' : (isCloudRelay ? 'Cloud Relay' : 'WiFi Host');
-          this.connectedDeviceName = `AirCanvas ${prefix} (${ip}:${port})`;
-          this.startHeartbeat();
-          this.notify();
-        };
+            socket.onopen = () => {
+              this.state = 'connected';
+              const prefix = transport === 'usb' ? 'USB Cable' : (isFallback || isCloudRelay ? 'Web Relay' : 'WiFi Host');
+              this.connectedDeviceName = `AirCanvas ${prefix} (${ip}:${port})`;
+              this.startHeartbeat();
+              this.notify();
+            };
 
-        socket.onmessage = (ev) => {
-          this.processIncomingSocketData(ev.data);
-        };
+            socket.onmessage = (ev) => {
+              this.processIncomingSocketData(ev.data);
+            };
 
-        socket.onerror = () => {
-          // Graceful fallback for offline or unreachable host in sandbox
-        };
+            socket.onerror = () => {
+              // If native port was blocked or unreachable, try Web Relay on web port
+              if (!isFallback && typeof window !== 'undefined' && !isCloudRelay) {
+                const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                const fallbackUrl = `${proto}//${window.location.host}/ws?pin=${encodeURIComponent(pin)}&role=client`;
+                connectClientSocket(fallbackUrl, true);
+              }
+            };
 
-        socket.onclose = () => {
-          if (this.state === 'connected') {
-            this.disconnect();
+            socket.onclose = () => {
+              if (this.state === 'connected' && this.ws === socket) {
+                this.disconnect();
+              }
+            };
+          } catch (e) {
+            console.warn('[WebSocket] Connection attempt error', e);
           }
         };
+
+        connectClientSocket(wsUrl);
       } catch (e) {
         console.warn('[WebSocket] Connection attempt failed', e);
       }
@@ -671,6 +695,21 @@ export class ConnectionManager {
   }
 
   public async autoDetectLocalIp(): Promise<string | null> {
+    if (typeof window !== 'undefined') {
+      try {
+        const res = await fetch('/api/network-info');
+        if (res.ok) {
+          const data = await res.json();
+          if (data && data.ip && data.ip !== '127.0.0.1') {
+            this.localIp = data.ip;
+            if (data.serverPort) this.serverPort = data.serverPort;
+            this.notify();
+            return data.ip;
+          }
+        }
+      } catch { }
+    }
+
     if (typeof window === 'undefined' || !window.RTCPeerConnection) return null;
     return new Promise((resolve) => {
       try {
@@ -720,14 +759,21 @@ export class ConnectionManager {
     format: 'web' | 'protocol' | 'ws' | 'json' = 'web',
     customHost?: string
   ): string {
-    const host = (customHost || this.localIp).trim();
+    const rawHost = (customHost || this.localIp).trim();
+    const isLocal = rawHost === 'localhost' || rawHost === '127.0.0.1' || rawHost.startsWith('127.');
+    const host = isLocal ? this.localIp : rawHost;
     const port = this.serverPort;
     const pin = this.pairingPin;
 
     if (format === 'web') {
-      const origin = typeof window !== 'undefined' ? window.location.origin : 'http://localhost:3000';
+      const protocol = typeof window !== 'undefined' ? window.location.protocol : 'http:';
+      const webPort = typeof window !== 'undefined' && window.location.port ? window.location.port : '3000';
       const pathname = typeof window !== 'undefined' ? window.location.pathname : '/';
-      return `${origin}${pathname}?connect=true&ip=${encodeURIComponent(host)}&port=${port}&pin=${encodeURIComponent(pin)}&mode=tablet`;
+      const webHost = (typeof window !== 'undefined' && !isLocal && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1')
+        ? window.location.host
+        : `${host}:${webPort}`;
+
+      return `${protocol}//${webHost}${pathname}?connect=true&ip=${encodeURIComponent(host)}&port=${port}&pin=${encodeURIComponent(pin)}&mode=tablet`;
     }
 
     if (format === 'protocol') {
@@ -740,7 +786,7 @@ export class ConnectionManager {
 
     return JSON.stringify({
       app: 'AirCanvas',
-      version: '1.7.1',
+      version: '1.7.8',
       ip: host,
       port,
       pin,

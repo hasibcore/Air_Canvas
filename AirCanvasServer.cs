@@ -31,7 +31,7 @@ namespace AirCanvas.Server
 
     public class AirCanvasServer
     {
-        public const string VERSION = "1.7.6 PRO";
+        public const string VERSION = "1.7.8 PRO";
         public const int DEFAULT_PORT = 9090;
         public const int DISCOVERY_PORT = 9091;
 
@@ -639,6 +639,8 @@ namespace AirCanvas.Server
         private static bool _isRunning = true;
         private static TcpListener _tcpListener = null;
         private static UdpClient _udpListener = null;
+        public static readonly List<NetworkStream> _activeClients = new List<NetworkStream>();
+        public static readonly object _clientsLock = new object();
 
         public static void StartWebSocketServer()
         {
@@ -712,125 +714,145 @@ namespace AirCanvas.Server
 
         private static void HandleClient(TcpClient client)
         {
+            NetworkStream stream = null;
             try
             {
                 client.NoDelay = true; // Ultra low latency TCP
-                using (NetworkStream stream = client.GetStream())
+                stream = client.GetStream();
+
+                byte[] buffer = new byte[4096];
+                int bytesRead = stream.Read(buffer, 0, buffer.Length);
+                if (bytesRead <= 0) return;
+
+                string request = Encoding.UTF8.GetString(buffer, 0, bytesRead);
+
+                // If simple HTTP probe / health check
+                if (!request.Contains("Upgrade: websocket") && !request.Contains("upgrade: websocket"))
                 {
-                    byte[] buffer = new byte[4096];
-                    int bytesRead = stream.Read(buffer, 0, buffer.Length);
-                    if (bytesRead <= 0) return;
-
-                    string request = Encoding.UTF8.GetString(buffer, 0, bytesRead);
-
-                    // If simple HTTP probe / health check
-                    if (!request.Contains("Upgrade: websocket") && !request.Contains("upgrade: websocket"))
-                    {
-                        string httpResp = "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: text/plain\r\n\r\nAirCanvas Windows Server v" + VERSION + " is ACTIVE on port " + DEFAULT_PORT + ".\n";
-                        byte[] respBytes = Encoding.UTF8.GetBytes(httpResp);
-                        stream.Write(respBytes, 0, respBytes.Length);
-                        return;
-                    }
-
-                    // Extract Sec-WebSocket-Key
-                    string key = "";
-                    string[] lines = request.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None);
-                    foreach (string line in lines)
-                    {
-                        if (line.StartsWith("Sec-WebSocket-Key:", StringComparison.OrdinalIgnoreCase))
-                        {
-                            key = line.Substring("Sec-WebSocket-Key:".Length).Trim();
-                            break;
-                        }
-                    }
-
-                    if (string.IsNullOrEmpty(key)) return;
-
-                    // Standard RFC 6455 Handshake Response
-                    string magic = key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
-                    byte[] hash = SHA1.Create().ComputeHash(Encoding.UTF8.GetBytes(magic));
-                    string acceptKey = Convert.ToBase64String(hash);
-
-                    string response = "HTTP/1.1 101 Switching Protocols\r\n" +
-                                      "Upgrade: websocket\r\n" +
-                                      "Connection: Upgrade\r\n" +
-                                      "Sec-WebSocket-Accept: " + acceptKey + "\r\n\r\n";
-                    byte[] responseBytes = Encoding.UTF8.GetBytes(response);
-                    stream.Write(responseBytes, 0, responseBytes.Length);
-
-                    Console.ForegroundColor = ConsoleColor.Green;
-                    Console.WriteLine("[CONNECTED] Mobile tablet paired: " + client.Client.RemoteEndPoint);
-                    Console.ResetColor();
-
-                    // Read frames
-                    while (_isRunning && client.Connected)
-                    {
-                        int b0 = stream.ReadByte();
-                        if (b0 == -1) break;
-
-                        int opcode = b0 & 0x0F;
-                        if (opcode == 0x8) break; // Close
-
-                        int b1 = stream.ReadByte();
-                        if (b1 == -1) break;
-
-                        bool masked = (b1 & 0x80) != 0;
-                        long payloadLength = b1 & 0x7F;
-
-                        if (payloadLength == 126)
-                        {
-                            int l0 = stream.ReadByte();
-                            int l1 = stream.ReadByte();
-                            payloadLength = (l0 << 8) | l1;
-                        }
-                        else if (payloadLength == 127)
-                        {
-                            byte[] lenBytes = new byte[8];
-                            ReadExact(stream, lenBytes, 8);
-                            Array.Reverse(lenBytes);
-                            payloadLength = BitConverter.ToInt64(lenBytes, 0);
-                        }
-
-                        byte[] maskKey = new byte[4];
-                        if (masked)
-                        {
-                            ReadExact(stream, maskKey, 4);
-                        }
-
-                        byte[] payload = new byte[payloadLength];
-                        ReadExact(stream, payload, (int)payloadLength);
-
-                        if (masked)
-                        {
-                            for (int i = 0; i < payload.Length; i++)
-                            {
-                                payload[i] ^= maskKey[i % 4];
-                            }
-                        }
-
-                        if (opcode == 0x1) // JSON Text Frame
-                        {
-                            string json = Encoding.UTF8.GetString(payload);
-                            ProcessJsonPacket(json, stream);
-                        }
-                        else if (opcode == 0x2) // Binary Frame
-                        {
-                            ProcessBinaryPacket(payload, payload.Length, stream, client);
-                        }
-                        else if (opcode == 0x9) // Ping
-                        {
-                            SendPong(stream, payload);
-                        }
-                    }
-
-                    Console.ForegroundColor = ConsoleColor.Yellow;
-                    Console.WriteLine("[DISCONNECTED] Mobile tablet closed session: " + client.Client.RemoteEndPoint);
-                    Console.ResetColor();
+                    string httpResp = "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: text/plain\r\n\r\nAirCanvas Windows Server v" + VERSION + " is ACTIVE on port " + DEFAULT_PORT + ".\n";
+                    byte[] respBytes = Encoding.UTF8.GetBytes(httpResp);
+                    stream.Write(respBytes, 0, respBytes.Length);
+                    return;
                 }
+
+                // Extract Sec-WebSocket-Key
+                string key = "";
+                string[] lines = request.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None);
+                foreach (string line in lines)
+                {
+                    if (line.StartsWith("Sec-WebSocket-Key:", StringComparison.OrdinalIgnoreCase))
+                    {
+                        key = line.Substring("Sec-WebSocket-Key:".Length).Trim();
+                        break;
+                    }
+                }
+
+                if (string.IsNullOrEmpty(key)) return;
+
+                // Standard RFC 6455 Handshake Response
+                string magic = key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+                byte[] hash = SHA1.Create().ComputeHash(Encoding.UTF8.GetBytes(magic));
+                string acceptKey = Convert.ToBase64String(hash);
+
+                string response = "HTTP/1.1 101 Switching Protocols\r\n" +
+                                  "Upgrade: websocket\r\n" +
+                                  "Connection: Upgrade\r\n" +
+                                  "Sec-WebSocket-Accept: " + acceptKey + "\r\n\r\n";
+                byte[] responseBytes = Encoding.UTF8.GetBytes(response);
+                stream.Write(responseBytes, 0, responseBytes.Length);
+
+                lock (_clientsLock)
+                {
+                    _activeClients.Add(stream);
+                }
+
+                long joinTime = DateTime.UtcNow.Ticks / 10000;
+                Console.ForegroundColor = ConsoleColor.Green;
+                Console.WriteLine("[CONNECTED] Device paired: " + client.Client.RemoteEndPoint + " (Total active peers: " + _activeClients.Count + ")");
+                Console.ResetColor();
+
+                // Send confirmation to new client & broadcast peer_connected to others
+                SendWsTextMessage(stream, "{\"type\":\"room_joined\",\"role\":\"client\",\"peerCount\":" + _activeClients.Count + ",\"timestamp\":" + joinTime + "}");
+                BroadcastWsTextMessage("{\"type\":\"peer_connected\",\"role\":\"client\",\"peerCount\":" + _activeClients.Count + ",\"timestamp\":" + joinTime + "}", stream);
+
+                // Read frames
+                while (_isRunning && client.Connected)
+                {
+                    int b0 = stream.ReadByte();
+                    if (b0 == -1) break;
+
+                    int opcode = b0 & 0x0F;
+                    if (opcode == 0x8) break; // Close
+
+                    int b1 = stream.ReadByte();
+                    if (b1 == -1) break;
+
+                    bool masked = (b1 & 0x80) != 0;
+                    long payloadLength = b1 & 0x7F;
+
+                    if (payloadLength == 126)
+                    {
+                        int l0 = stream.ReadByte();
+                        int l1 = stream.ReadByte();
+                        payloadLength = (l0 << 8) | l1;
+                    }
+                    else if (payloadLength == 127)
+                    {
+                        byte[] lenBytes = new byte[8];
+                        ReadExact(stream, lenBytes, 8);
+                        Array.Reverse(lenBytes);
+                        payloadLength = BitConverter.ToInt64(lenBytes, 0);
+                    }
+
+                    byte[] maskKey = new byte[4];
+                    if (masked)
+                    {
+                        ReadExact(stream, maskKey, 4);
+                    }
+
+                    byte[] payload = new byte[payloadLength];
+                    ReadExact(stream, payload, (int)payloadLength);
+
+                    if (masked)
+                    {
+                        for (int i = 0; i < payload.Length; i++)
+                        {
+                            payload[i] ^= maskKey[i % 4];
+                        }
+                    }
+
+                    if (opcode == 0x1) // JSON Text Frame
+                    {
+                        string json = Encoding.UTF8.GetString(payload);
+                        ProcessJsonPacket(json, stream);
+                        BroadcastWsTextMessage(json, stream);
+                    }
+                    else if (opcode == 0x2) // Binary Frame
+                    {
+                        ProcessBinaryPacket(payload, payload.Length, stream, client);
+                        BroadcastWsBinary(payload, stream);
+                    }
+                    else if (opcode == 0x9) // Ping
+                    {
+                        SendPong(stream, payload);
+                    }
+                }
+
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine("[DISCONNECTED] Device closed session: " + client.Client.RemoteEndPoint);
+                Console.ResetColor();
             }
             catch { }
             finally
             {
+                if (stream != null)
+                {
+                    lock (_clientsLock)
+                    {
+                        _activeClients.Remove(stream);
+                    }
+                    BroadcastWsTextMessage("{\"type\":\"peer_disconnected\",\"peerCount\":" + _activeClients.Count + ",\"timestamp\":" + (DateTime.UtcNow.Ticks / 10000) + "}", null);
+                }
                 try { client.Close(); } catch { }
             }
         }
@@ -868,16 +890,118 @@ namespace AirCanvas.Server
             catch { }
         }
 
-        private static void SendWsTextMessage(NetworkStream stream, string text)
+        private static byte[] BuildWsTextFrame(string text)
         {
             try
             {
                 byte[] raw = Encoding.UTF8.GetBytes(text);
-                byte[] frame = new byte[raw.Length + 2];
-                frame[0] = 0x81; // FIN + text
-                frame[1] = (byte)raw.Length;
-                Buffer.BlockCopy(raw, 0, frame, 2, raw.Length);
-                stream.Write(frame, 0, frame.Length);
+                if (raw.Length <= 125)
+                {
+                    byte[] frame = new byte[raw.Length + 2];
+                    frame[0] = 0x81;
+                    frame[1] = (byte)raw.Length;
+                    Buffer.BlockCopy(raw, 0, frame, 2, raw.Length);
+                    return frame;
+                }
+                else if (raw.Length <= 65535)
+                {
+                    byte[] frame = new byte[raw.Length + 4];
+                    frame[0] = 0x81;
+                    frame[1] = 126;
+                    frame[2] = (byte)((raw.Length >> 8) & 0xFF);
+                    frame[3] = (byte)(raw.Length & 0xFF);
+                    Buffer.BlockCopy(raw, 0, frame, 4, raw.Length);
+                    return frame;
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        private static byte[] BuildWsBinaryFrame(byte[] payload)
+        {
+            try
+            {
+                if (payload.Length <= 125)
+                {
+                    byte[] frame = new byte[payload.Length + 2];
+                    frame[0] = 0x82;
+                    frame[1] = (byte)payload.Length;
+                    Buffer.BlockCopy(payload, 0, frame, 2, payload.Length);
+                    return frame;
+                }
+                else if (payload.Length <= 65535)
+                {
+                    byte[] frame = new byte[payload.Length + 4];
+                    frame[0] = 0x82;
+                    frame[1] = 126;
+                    frame[2] = (byte)((payload.Length >> 8) & 0xFF);
+                    frame[3] = (byte)(payload.Length & 0xFF);
+                    Buffer.BlockCopy(payload, 0, frame, 4, payload.Length);
+                    return frame;
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        public static void SendWsTextMessage(NetworkStream stream, string text)
+        {
+            try
+            {
+                byte[] frame = BuildWsTextFrame(text);
+                if (frame != null)
+                {
+                    stream.Write(frame, 0, frame.Length);
+                }
+            }
+            catch { }
+        }
+
+        public static void BroadcastWsTextMessage(string text, NetworkStream senderStream)
+        {
+            try
+            {
+                byte[] frame = BuildWsTextFrame(text);
+                if (frame == null) return;
+
+                List<NetworkStream> targets;
+                lock (_clientsLock)
+                {
+                    targets = new List<NetworkStream>(_activeClients);
+                }
+
+                foreach (var client in targets)
+                {
+                    if (client != senderStream)
+                    {
+                        try { client.Write(frame, 0, frame.Length); } catch { }
+                    }
+                }
+            }
+            catch { }
+        }
+
+        public static void BroadcastWsBinary(byte[] payload, NetworkStream senderStream)
+        {
+            try
+            {
+                byte[] frame = BuildWsBinaryFrame(payload);
+                if (frame == null) return;
+
+                List<NetworkStream> targets;
+                lock (_clientsLock)
+                {
+                    targets = new List<NetworkStream>(_activeClients);
+                }
+
+                foreach (var client in targets)
+                {
+                    if (client != senderStream)
+                    {
+                        try { client.Write(frame, 0, frame.Length); } catch { }
+                    }
+                }
             }
             catch { }
         }
@@ -929,7 +1053,7 @@ namespace AirCanvas.Server
             return defVal;
         }
 
-        private static string GetPrimaryLocalIp()
+        public static string GetPrimaryLocalIp()
         {
             try
             {
@@ -1011,6 +1135,16 @@ namespace AirCanvas.Server
             Console.WriteLine();
         }
 
+        public static void StartServerBackground()
+        {
+            if (_isRunning) return;
+            InitializeDpiAwareness();
+            RefreshScreenMetrics();
+            try { InitializeSyntheticPen(); } catch { }
+            StartWebSocketServer();
+            StartUdpDiscovery();
+        }
+
         public static void Main(string[] args)
         {
             Console.Title = "Air Canvas Windows Server v" + VERSION;
@@ -1041,25 +1175,32 @@ namespace AirCanvas.Server
             // Start interactive loop
             while (_isRunning)
             {
-                if (Console.KeyAvailable)
+                try
                 {
-                    var key = Console.ReadKey(true).Key;
-                    if (key == ConsoleKey.Q)
+                    if (Console.KeyAvailable)
                     {
-                        _isRunning = false;
-                        try { if (_tcpListener != null) _tcpListener.Stop(); } catch { }
-                        try { if (_udpListener != null) _udpListener.Close(); } catch { }
+                        var key = Console.ReadKey(true).Key;
+                        if (key == ConsoleKey.Q)
+                        {
+                            _isRunning = false;
+                            try { if (_tcpListener != null) _tcpListener.Stop(); } catch { }
+                            try { if (_udpListener != null) _udpListener.Close(); } catch { }
+                        }
+                        else if (key == ConsoleKey.T)
+                        {
+                            RefreshScreenMetrics();
+                            RunDpiDiagnosticTests();
+                        }
+                        else if (key == ConsoleKey.C)
+                        {
+                            Console.Clear();
+                            PrintConnectionInstructions();
+                        }
                     }
-                    else if (key == ConsoleKey.T)
-                    {
-                        RefreshScreenMetrics();
-                        RunDpiDiagnosticTests();
-                    }
-                    else if (key == ConsoleKey.C)
-                    {
-                        Console.Clear();
-                        PrintConnectionInstructions();
-                    }
+                }
+                catch (InvalidOperationException)
+                {
+                    // Non-interactive background service mode
                 }
                 Thread.Sleep(50);
             }

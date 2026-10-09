@@ -10,8 +10,42 @@ function websocketRelay(): Plugin {
 
       try {
         const { WebSocketServer, WebSocket } = await import('ws');
+        const os = await import('node:os');
         const rooms = new Map<string, Set<any>>();
         const wss = new WebSocketServer({ noServer: true });
+
+        // LAN IP Auto-Discovery Endpoint for Mobile Pairing
+        server.middlewares.use((req, res, next) => {
+          const url = req.url || '';
+          if (url.startsWith('/api/network-info') || url.startsWith('/api/ip')) {
+            const ifaces = os.networkInterfaces();
+            let primaryIp = '127.0.0.1';
+            const allIps: string[] = [];
+            for (const [name, addrs] of Object.entries(ifaces)) {
+              for (const a of (addrs || []) as any[]) {
+                if (a.family === 'IPv4' && !a.internal && !a.address.startsWith('169.254.')) {
+                  allIps.push(a.address);
+                  if (name.toLowerCase().includes('wi-fi') || name.toLowerCase().includes('wlan') || name.toLowerCase().includes('wireless')) {
+                    primaryIp = a.address;
+                  } else if (primaryIp === '127.0.0.1') {
+                    primaryIp = a.address;
+                  }
+                }
+              }
+            }
+            res.setHeader('Content-Type', 'application/json; charset=utf-8');
+            res.setHeader('Access-Control-Allow-Origin', '*');
+            res.end(JSON.stringify({
+              ip: primaryIp,
+              allIps,
+              webPort: 3000,
+              serverPort: 9090,
+              pin: '1234'
+            }));
+            return;
+          }
+          next();
+        });
 
         server.httpServer.on('upgrade', (req, socket, head) => {
           const url = req.url || '';

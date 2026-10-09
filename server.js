@@ -1,6 +1,7 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer, WebSocket } from 'ws';
 
@@ -63,6 +64,37 @@ const server = http.createServer((req, res) => {
 
   const rawUrl = req.url || '/';
   const parsedPath = rawUrl.split('?')[0];
+
+  // Network info endpoint for instant mobile QR pairing
+  if (parsedPath === '/api/network-info' || parsedPath === '/api/ip') {
+    const ifaces = os.networkInterfaces();
+    let primaryIp = '127.0.0.1';
+    const allIps = [];
+    for (const [name, addrs] of Object.entries(ifaces)) {
+      for (const a of addrs || []) {
+        if (a.family === 'IPv4' && !a.internal && !a.address.startsWith('169.254.')) {
+          allIps.push(a.address);
+          if (name.toLowerCase().includes('wi-fi') || name.toLowerCase().includes('wlan') || name.toLowerCase().includes('wireless')) {
+            primaryIp = a.address;
+          } else if (primaryIp === '127.0.0.1') {
+            primaryIp = a.address;
+          }
+        }
+      }
+    }
+    res.writeHead(200, {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Access-Control-Allow-Origin': '*',
+    });
+    res.end(JSON.stringify({
+      ip: primaryIp,
+      allIps,
+      webPort: PORT,
+      serverPort: 9090,
+      pin: '1234',
+    }));
+    return;
+  }
 
   // Health check endpoint for Cloud Run
   if (parsedPath === '/health' || parsedPath === '/_health') {
