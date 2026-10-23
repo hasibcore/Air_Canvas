@@ -1,0 +1,186 @@
+name: Build and Release AirCanvas v2.0.0
+
+on:
+  push:
+    tags:
+      - 'v*'
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    name: Build Windows v2.0.0 Release (.exe + Web Studio)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build & Verify v2.0.0 Web Studio, Phase 4.10 Target Mapping & V3 Suites
+        run: |
+          npm install
+          npm run lint
+          node run_calibration_tests.js
+          node test_live_dual_device.js
+          npm run build
+
+      - name: Compile Native Windows Desktop & Server Executables (v2.0.0)
+        shell: cmd
+        run: |
+          C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe /target:winexe /win32manifest:app.manifest /win32icon:app.ico /out:AirCanvas.exe /main:AirCanvas.Program /optimize+ /r:System.Drawing.dll /r:System.Windows.Forms.dll /r:System.dll AirCanvasServer.cs AirCanvasDesktop.cs
+          C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe /target:exe /win32manifest:app.manifest /win32icon:app.ico /out:AirCanvasServer.exe /main:AirCanvas.Server.AirCanvasServer /optimize+ /r:System.Drawing.dll /r:System.Windows.Forms.dll /r:System.dll AirCanvasServer.cs
+
+      - name: Compress Windows v2.0.0 Release Bundle
+        shell: pwsh
+        run: |
+          Compress-Archive -Path AirCanvas.exe, AirCanvasServer.exe, dist, Fix_Firewall.bat, Start_AirCanvas_USB.bat, app.ico, PROJECT_AUDIT.md, AUDIT_CHECKPOINT.md -DestinationPath AirCanvas-Windows-x64.zip -Force
+
+      - name: Upload Windows Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AirCanvas-Windows-x64
+          path: |
+            AirCanvas-Windows-x64.zip
+            AirCanvas.exe
+            AirCanvasServer.exe
+            PROJECT_AUDIT.md
+            AUDIT_CHECKPOINT.md
+
+
+  build-android:
+    name: Build Android v2.0.0 APK (.apk)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          cache: true
+
+      - name: Generate Android Project scaffolding
+        run: |
+          rm -rf android
+          flutter create . --platforms=android --org com.aircanvas.tablet
+
+          # 1. Generate standard valid 2048-bit release keystore valid for 25 years
+          keytool -genkeypair -v -keystore android/app/release.keystore \
+            -alias aircanvas \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass aircanvas123 -keypass aircanvas123 \
+            -dname "CN=AirCanvas, OU=Mobile, O=AirCanvas, L=Dhaka, ST=Dhaka, C=BD"
+
+          # 2. Configure build.gradle.kts / build.gradle with minSdk 24 for universal Android compatibility
+          python3 -c "
+          import os
+          for path in ['android/app/build.gradle.kts', 'android/app/build.gradle']:
+              if os.path.exists(path):
+                  with open(path, 'r') as f: content = f.read()
+                  content = content.replace('minSdk = flutter.minSdkVersion', 'minSdk = 24')
+                  content = content.replace('minSdkVersion flutter.minSdkVersion', 'minSdkVersion 24')
+                  with open(path, 'w') as f: f.write(content)
+                  print(f'Configured {path} with minSdk 24.')
+          "
+
+          # 3. Safely inject network and multicast permissions into generated AndroidManifest
+          python3 -c "
+          p = 'android/app/src/main/AndroidManifest.xml'
+          with open(p, 'r') as f: content = f.read()
+          perms = '''    <uses-permission android:name=\"android.permission.INTERNET\" />\n    <uses-permission android:name=\"android.permission.ACCESS_NETWORK_STATE\" />\n    <uses-permission android:name=\"android.permission.ACCESS_WIFI_STATE\" />\n    <uses-permission android:name=\"android.permission.CHANGE_WIFI_MULTICAST_STATE\" />\n    <uses-permission android:name=\"android.permission.NEARBY_WIFI_DEVICES\" android:usesPermissionFlags=\"neverForLocation\" />\n'''
+          if 'android.permission.INTERNET' not in content:
+              content = content.replace('<application', perms + '    <application')
+          if 'android:usesCleartextTraffic' not in content:
+              content = content.replace('<application', '<application android:usesCleartextTraffic=\\'true\\'')
+          with open(p, 'w') as f: f.write(content)
+          print('Updated AndroidManifest with network permissions and usesCleartextTraffic successfully.')
+          "
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Build Android Release APK (v2.0.0)
+        run: flutter build apk --release --build-name=2.0.0 --build-number=200
+
+      - name: Align and Sign APK with v1, v2, and v3 Signature Schemes
+        run: |
+          BUILD_TOOLS=$(find $ANDROID_HOME/build-tools -name apksigner -exec dirname {} \; | sort -V | tail -n 1)
+          echo "Found Android Build Tools at: $BUILD_TOOLS"
+
+          TARGET_APK="build/app/outputs/flutter-apk/app-release.apk"
+          if [ ! -f "$TARGET_APK" ]; then
+            TARGET_APK=$(find build/ -name "*release*.apk" | head -n 1)
+          fi
+          echo "Source APK: $TARGET_APK"
+
+          # Step 1: Sign with jarsigner to guarantee v1 JAR scheme presence (META-INF/*.SF, *.RSA)
+          jarsigner -verbose -sigalg SHA256withRSA -digestalg SHA-256 \
+            -keystore android/app/release.keystore \
+            -storepass aircanvas123 -keypass aircanvas123 \
+            "$TARGET_APK" aircanvas
+
+          # Step 2: 4-byte zipalign
+          $BUILD_TOOLS/zipalign -f -p 4 "$TARGET_APK" AirCanvas-aligned.apk
+
+          # Step 3: Sign with apksigner (v1 + v2 + v3 schemes)
+          $BUILD_TOOLS/apksigner sign --ks android/app/release.keystore \
+            --ks-pass pass:aircanvas123 \
+            --ks-key-alias aircanvas \
+            --key-pass pass:aircanvas123 \
+            --v1-signing-enabled true \
+            --v2-signing-enabled true \
+            --v3-signing-enabled true \
+            --out AirCanvas-release.apk \
+            AirCanvas-aligned.apk
+
+          # Step 4: Verify full signature compatibility
+          echo "=== Verifying APK Signature Schemes ==="
+          $BUILD_TOOLS/apksigner verify --verbose AirCanvas-release.apk
+
+      - name: Upload Android Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AirCanvas-release.apk
+          path: AirCanvas-release.apk
+
+  release:
+    name: Create GitHub Release (v2.0.0)
+    needs: [build-windows, build-android]
+    if: always() && (needs.build-windows.result == 'success' || needs.build-android.result == 'success')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Publish Release with Binaries
+        uses: softprops/action-gh-release@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          tag_name: ${{ (github.ref_type == 'tag' && github.ref_name) || 'v2.0.0' }}
+          name: AirCanvas ${{ (github.ref_type == 'tag' && github.ref_name) || 'v2.0.0' }} - Full-Screen Mobile Pad & 1:1 PC Working Area
+          files: |
+            release-assets/*
+          draft: false
+          prerelease: false
+          generate_release_notes: true
