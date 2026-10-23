@@ -126,6 +126,14 @@ namespace AirCanvas
                     if (bytesRead <= 0) return;
 
                     string requestText = Encoding.UTF8.GetString(buffer, 0, bytesRead);
+
+                    // Support WebSocket connections directly on the Desktop HTTP Port (3005) as well as Port 9090
+                    if (requestText.IndexOf("Upgrade: websocket", StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        AirCanvasServer.HandleWebSocketStream(client, stream, requestText);
+                        return;
+                    }
+
                     string[] lines = requestText.Split(new[] { "\r\n" }, StringSplitOptions.None);
                     if (lines.Length == 0) return;
 
@@ -139,7 +147,7 @@ namespace AirCanvas
                     {
                         string primaryIp = AirCanvasServer.GetPrimaryLocalIp();
                         string allIpsJson = AirCanvasServer.GetAllLocalIpsJsonArray();
-                        string json = "{\"ip\":\"" + primaryIp + "\",\"allIps\":" + allIpsJson + ",\"webPort\":" + _httpPort + ",\"serverPort\":9090,\"pin\":\"1234\"}";
+                        string json = "{\"ip\":\"" + primaryIp + "\",\"allIps\":" + allIpsJson + ",\"webPort\":" + _httpPort + ",\"serverPort\":9090,\"pin\":\"1234\",\"version\":\"" + AirCanvasServer.VERSION + "\"}";
                         byte[] jsonBytes = Encoding.UTF8.GetBytes(json);
                         string header = "HTTP/1.1 200 OK\r\n" +
                                         "Content-Type: application/json; charset=utf-8\r\n" +

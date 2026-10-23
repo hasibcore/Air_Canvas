@@ -1,6 +1,6 @@
 // ==============================================================================================
 // AirCanvasServer.cs - High-Performance Windows Native Input Server & Synthetic Pen Injector
-// Version: 2.0.0 PRO
+// Version: 2.0.2 PRO
 // Features:
 // - 100% Mobile Full-Screen Pad -> PC Software Working Area 1:1 Mapping
 // - Auto-Detect Active PC Software Window & Canvas Working Area (Photoshop, Krita, OneNote, etc.)
@@ -119,7 +119,7 @@ namespace AirCanvas.Server
 
     public class AirCanvasServer
     {
-        public const string VERSION = "2.0.0 PRO";
+        public const string VERSION = "2.0.2 PRO";
         public const int DEFAULT_PORT = 9090;
         public const int DISCOVERY_PORT = 9091;
 
@@ -1467,10 +1467,50 @@ namespace AirCanvas.Server
             catch { }
         }
 
+        public static void EnsureFirewallRules()
+        {
+            Thread fwThread = new Thread(() =>
+            {
+                try
+                {
+                    string[] cmds = new string[]
+                    {
+                        "advfirewall firewall add rule name=\"AirCanvas TCP 9090\" dir=in action=allow protocol=TCP localport=9090 profile=any",
+                        "advfirewall firewall add rule name=\"AirCanvas Web 3005\" dir=in action=allow protocol=TCP localport=3005 profile=any",
+                        "advfirewall firewall add rule name=\"AirCanvas UDP 9091\" dir=in action=allow protocol=UDP localport=9091 profile=any"
+                    };
+                    foreach (string args in cmds)
+                    {
+                        try
+                        {
+                            ProcessStartInfo psi = new ProcessStartInfo
+                            {
+                                FileName = "netsh",
+                                Arguments = args,
+                                CreateNoWindow = true,
+                                UseShellExecute = false,
+                                RedirectStandardOutput = true,
+                                RedirectStandardError = true
+                            };
+                            using (Process p = Process.Start(psi))
+                            {
+                                if (p != null) p.WaitForExit(1500);
+                            }
+                        }
+                        catch { }
+                    }
+                }
+                catch { }
+            });
+            fwThread.IsBackground = true;
+            fwThread.Start();
+        }
+
         public static void StartWebSocketServer()
         {
             try
             {
+                EnsureFirewallRules();
                 KillLingeringAirCanvasProcesses();
                 _tcpListener = new TcpListener(IPAddress.Any, DEFAULT_PORT);
                 try
@@ -1616,6 +1656,20 @@ namespace AirCanvas.Server
                     return;
                 }
 
+                HandleWebSocketStream(client, stream, request);
+            }
+            catch { }
+            finally
+            {
+                try { client.Close(); } catch { }
+            }
+        }
+
+        public static void HandleWebSocketStream(TcpClient client, NetworkStream stream, string request)
+        {
+            bool addedToActiveClients = false;
+            try
+            {
                 string key = "";
                 string[] lines = request.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None);
                 foreach (string line in lines)
@@ -1643,6 +1697,7 @@ namespace AirCanvas.Server
                 lock (_clientsLock)
                 {
                     _activeClients.Add(stream);
+                    addedToActiveClients = true;
                 }
 
                 long joinTime = DateTime.UtcNow.Ticks / 10000;
@@ -1651,7 +1706,12 @@ namespace AirCanvas.Server
                 Console.ResetColor();
 
                 SendWsTextMessage(stream, "{\"type\":\"room_joined\",\"role\":\"client\",\"peerCount\":" + _activeClients.Count + ",\"version\":\"" + VERSION + "\",\"timestamp\":" + joinTime + "}");
-                BroadcastWsTextMessage("{\"type\":\"peer_connected\",\"role\":\"client\",\"peerCount\":" + _activeClients.Count + ",\"timestamp\":" + joinTime + "}", stream);
+                int activeW = Math.Max(64, TargetScreen.Width);
+                int activeH = Math.Max(64, TargetScreen.Height);
+                string presetId = (ActiveWorkArea.PresetId ?? "auto");
+                SendWsTextMessage(stream, "{\"type\":\"workingAreaDetected\",\"workWidth\":" + activeW + ",\"workHeight\":" + activeH + ",\"appName\":\"" + presetId + "\",\"targetMode\":\"CANVAS\",\"targetAvailable\":true,\"canvasVerified\":true,\"requiresCalibration\":false}");
+                SendWsTextMessage(stream, "{\"type\":\"screen_sync\",\"screenWidth\":" + activeW + ",\"screenHeight\":" + activeH + ",\"timestamp\":" + joinTime + "}");
+                BroadcastWsTextMessage("{\"type\":\"peer_connected\",\"role\":\"client\",\"deviceName\":\"Android / Mobile Tablet\",\"transportType\":\"wifi\",\"peerCount\":" + _activeClients.Count + ",\"timestamp\":" + joinTime + "}", stream);
 
                 while (_isRunning && client.Connected)
                 {
@@ -1723,7 +1783,7 @@ namespace AirCanvas.Server
             finally
             {
                 ReleaseStuckPointerOnDisconnect();
-                if (stream != null)
+                if (stream != null && addedToActiveClients)
                 {
                     lock (_clientsLock)
                     {

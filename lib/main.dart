@@ -20,7 +20,7 @@ class AirCanvasApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Air Canvas v2.0.0',
+      title: 'Air Canvas v2.0.2',
       debugShowCheckedModeBanner: false,
       theme: ThemeData.dark().copyWith(
         scaffoldBackgroundColor: const Color(0xFF0A0A14),
@@ -177,14 +177,17 @@ class DiscoveredPC {
 // WEBSOCKET & UDP AUTO-DISCOVERY NETWORK MANAGER
 // ==============================================================================
 class NetworkConnectionManager extends ChangeNotifier {
+  static const String kCloudRelayHost = 'ais-pre-wagmzzgimsj3rkh5tc4yb3-89008514509.asia-southeast1.run.app';
   WebSocket? _socket;
   RawDatagramSocket? _udpSocket;
   bool isConnected = false;
   bool isConnecting = false;
   bool isScanning = false;
-  String statusMessage = 'Ready to Connect (Wi-Fi / USB / Auto-Scan)';
+  String statusMessage = 'Ready to Connect (Auto-Bridge Wi-Fi / USB / PIN)';
   String connectedIp = '';
   int connectedPort = 9090;
+  String pairingPin = '1234';
+  String activeTransport = 'wifi';
   int latencyMs = 0;
   int packetsSent = 0;
   String lastError = '';
@@ -301,8 +304,12 @@ class NetworkConnectionManager extends ChangeNotifier {
       final interfaces = await NetworkInterface.list(type: InternetAddressType.IPv4);
       final List<Future<void>> scanFutures = [];
 
-      // Also probe localhost (USB ADB reverse tcp:9090 tcp:9090)
+      // 1. Probe localhost (USB ADB reverse tcp:9090 tcp:9090 and tcp:3005)
       scanFutures.add(_probeHost('127.0.0.1', 9090));
+      scanFutures.add(_probeHost('127.0.0.1', 3005));
+
+      // 2. Probe Cloud Relay PIN Bridge so PC Host is always discoverable even if Firewall blocks LAN port 9090
+      scanFutures.add(_probeCloudBridge(pairingPin));
 
       for (final iface in interfaces) {
         for (final addr in iface.addresses) {
@@ -360,47 +367,136 @@ class NetworkConnectionManager extends ChangeNotifier {
     } catch (_) {}
   }
 
-  Future<bool> connect(String ip, int port) async {
-    final cleanIp = ip.trim();
-    if (cleanIp.isEmpty) {
-      lastError = 'Please enter a valid IP address.';
-      notifyListeners();
-      return false;
-    }
+  Future<void> _probeCloudBridge(String pin) async {
+    try {
+      final cleanPin = pin.trim().isEmpty ? '1234' : pin.trim();
+      final sw = Stopwatch()..start();
+      final ws = await WebSocket.connect(
+        'wss://$kCloudRelayHost/ws?pin=$cleanPin&role=client&name=Android-Scanner',
+      ).timeout(const Duration(milliseconds: 1800));
+      sw.stop();
+      await ws.close();
+      if (!discoveredDevices.any((d) => d.ip == 'auto-bridge')) {
+        discoveredDevices.add(DiscoveredPC(
+          name: 'PC Auto-Bridge (PIN: $cleanPin • Wi-Fi / USB / Cloud)',
+          ip: 'auto-bridge',
+          port: 9090,
+          latencyMs: sw.elapsedMilliseconds.clamp(1, 999),
+        ));
+        notifyListeners();
+      }
+    } catch (_) {}
+  }
+
+  Future<bool> connect(String ip, int port, {String? pin}) async {
+    final cleanIp = ip.trim().isEmpty ? 'auto-bridge' : ip.trim();
+    final cleanPin = (pin ?? pairingPin).trim().isEmpty ? '1234' : (pin ?? pairingPin).trim();
+    pairingPin = cleanPin;
 
     await disconnect();
     isConnecting = true;
     lastError = '';
-    statusMessage = 'Connecting to ws://$cleanIp:$port...';
+    statusMessage = 'Auto-Bridging to PC ($cleanIp:$port • PIN $cleanPin)...';
     notifyListeners();
 
-    try {
-      WebSocket? sock;
-      try {
-        final wsUrl = 'ws://$cleanIp:$port/aircanvas?pin=1234&role=client&name=Android-APK&transport=wifi';
-        sock = await WebSocket.connect(wsUrl).timeout(const Duration(seconds: 3));
-      } catch (_) {
-        final fallbackUrl = 'ws://$cleanIp:$port';
-        sock = await WebSocket.connect(fallbackUrl).timeout(const Duration(seconds: 3));
+    final List<Map<String, String>> candidates = [];
+    final bool isDirectIp = cleanIp != 'auto-bridge' && cleanIp != 'cloud' && cleanIp != 'relay';
+
+    if (isDirectIp) {
+      final String transportTag = cleanIp == '127.0.0.1' ? 'usb' : 'wifi';
+      candidates.add({
+        'url': 'ws://$cleanIp:$port/aircanvas?pin=$cleanPin&role=client&name=Android-APK&transport=$transportTag',
+        'label': '$cleanIp:$port',
+        'transport': transportTag,
+      });
+      candidates.add({
+        'url': 'ws://$cleanIp:$port',
+        'label': '$cleanIp:$port',
+        'transport': transportTag,
+      });
+      if (port != 3005) {
+        candidates.add({
+          'url': 'ws://$cleanIp:3005/ws?pin=$cleanPin&role=client&name=Android-APK&transport=$transportTag',
+          'label': '$cleanIp:3005 (PC Desktop Bridge)',
+          'transport': transportTag,
+        });
       }
+      if (cleanIp != '127.0.0.1') {
+        candidates.add({
+          'url': 'ws://127.0.0.1:9090/aircanvas?pin=$cleanPin&role=client&name=Android-APK&transport=usb',
+          'label': '127.0.0.1:9090 (USB Direct)',
+          'transport': 'usb',
+        });
+      }
+    } else {
+      // Try USB 127.0.0.1 first in case USB cable is connected
+      candidates.add({
+        'url': 'ws://127.0.0.1:9090/aircanvas?pin=$cleanPin&role=client&name=Android-APK&transport=usb',
+        'label': '127.0.0.1:9090 (USB Direct)',
+        'transport': 'usb',
+      });
+    }
+
+    // Always append Cloud Relay PIN Auto-Bridge so if Windows Firewall or router AP isolation blocks port 9090,
+    // the Android APK still connects to the PC and injects strokes seamlessly!
+    candidates.add({
+      'url': 'wss://$kCloudRelayHost/ws?pin=$cleanPin&role=client&name=Android-APK&transport=wifi',
+      'label': 'Auto-Bridge PIN $cleanPin',
+      'transport': 'cloud-bridge',
+    });
+    candidates.add({
+      'url': 'wss://$kCloudRelayHost/aircanvas?pin=$cleanPin&role=client&name=Android-APK&transport=wifi',
+      'label': 'Auto-Bridge Fallback PIN $cleanPin',
+      'transport': 'cloud-bridge',
+    });
+
+    WebSocket? sock;
+    String connectedLabel = '$cleanIp:$port';
+    String selectedTransport = 'wifi';
+
+    for (final cand in candidates) {
+      try {
+        statusMessage = 'Trying ${cand['label']}...';
+        notifyListeners();
+        final int timeoutMs = cand['transport'] == 'cloud-bridge' ? 3200 : 1400;
+        sock = await WebSocket.connect(cand['url']!).timeout(Duration(milliseconds: timeoutMs));
+        connectedLabel = cand['label']!;
+        selectedTransport = cand['transport']!;
+        break;
+      } catch (_) {
+        sock = null;
+      }
+    }
+
+    if (sock == null) {
+      isConnected = false;
+      isConnecting = false;
+      lastError = 'Could not reach PC ($cleanIp:$port or PIN $cleanPin). Check Wi-Fi/Internet and ensure AirCanvas is open on PC.';
+      statusMessage = 'Connection failed';
+      notifyListeners();
+      return false;
+    }
+
+    try {
       _socket = sock;
       _socket!.pingInterval = const Duration(seconds: 2);
 
       isConnected = true;
       isConnecting = false;
-      connectedIp = cleanIp;
+      activeTransport = selectedTransport;
+      connectedIp = isDirectIp ? cleanIp : 'PIN:$cleanPin';
       connectedPort = port;
-      statusMessage = 'Connected ($cleanIp:$port) • 1:1 ${selectedPreset.shortLabel}';
+      statusMessage = 'Connected ($connectedLabel) • 1:1 ${selectedPreset.shortLabel}';
       notifyListeners();
 
-      // Send formal connect_request handshake for Web Studio + sync PC Software Working Area preset
+      // Send formal connect_request handshake for Web Studio & PC Desktop + sync PC Software Working Area preset
       try {
         _socket!.add(jsonEncode({
           'type': 'connect_request',
           'senderId': 'android_apk_${DateTime.now().millisecondsSinceEpoch}',
           'senderMode': 'client',
-          'pin': '1234',
-          'transportType': cleanIp == '127.0.0.1' ? 'usb' : 'wifi',
+          'pin': cleanPin,
+          'transportType': selectedTransport == 'usb' ? 'usb' : 'wifi',
           'deviceInfo': {
             'deviceName': 'Android Tablet / Phone (APK)',
             'deviceModel': 'Android Stylus Digitizer',
@@ -1664,15 +1760,17 @@ class ConnectionSetupView extends StatefulWidget {
 class _ConnectionSetupViewState extends State<ConnectionSetupView> {
   final TextEditingController _ipController = TextEditingController(text: '192.168.0.100');
   final TextEditingController _portController = TextEditingController(text: '9090');
+  final TextEditingController _pinController = TextEditingController(text: '1234');
 
   @override
   void initState() {
     super.initState();
     widget.net.addListener(_onNetChanged);
-    if (widget.net.connectedIp.isNotEmpty) {
+    if (widget.net.connectedIp.isNotEmpty && !widget.net.connectedIp.startsWith('PIN:')) {
       _ipController.text = widget.net.connectedIp;
     }
     _portController.text = widget.net.connectedPort.toString();
+    _pinController.text = widget.net.pairingPin;
   }
 
   void _onNetChanged() {
@@ -1684,6 +1782,7 @@ class _ConnectionSetupViewState extends State<ConnectionSetupView> {
     widget.net.removeListener(_onNetChanged);
     _ipController.dispose();
     _portController.dispose();
+    _pinController.dispose();
     super.dispose();
   }
 
@@ -1694,7 +1793,7 @@ class _ConnectionSetupViewState extends State<ConnectionSetupView> {
       appBar: AppBar(
         backgroundColor: const Color(0xFF121222),
         title: const Text(
-          'Air Canvas v2.0.0 — Connect & PC Working Area',
+          'Air Canvas v2.0.2 — Auto-Bridge Connect & PC Working Area',
           style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
         ),
         actions: [
@@ -1763,7 +1862,7 @@ class _ConnectionSetupViewState extends State<ConnectionSetupView> {
           ),
           const SizedBox(height: 14),
 
-          // Quick USB & Auto-Scan Row
+          // Quick Auto-Detect, USB & Auto-Bridge PIN Row
           Row(
             children: [
               Expanded(
@@ -1773,12 +1872,17 @@ class _ConnectionSetupViewState extends State<ConnectionSetupView> {
                     foregroundColor: Colors.black,
                     padding: const EdgeInsets.symmetric(vertical: 12),
                   ),
-                  onPressed: widget.net.isScanning ? null : () => widget.net.scanLocalNetwork(),
+                  onPressed: widget.net.isScanning
+                      ? null
+                      : () {
+                          widget.net.pairingPin = _pinController.text.trim().isEmpty ? '1234' : _pinController.text.trim();
+                          widget.net.scanLocalNetwork();
+                        },
                   icon: const Icon(Icons.radar, size: 18),
-                  label: Text(widget.net.isScanning ? 'Scanning Wi-Fi...' : 'Auto-Detect PC on Wi-Fi'),
+                  label: Text(widget.net.isScanning ? 'Scanning...' : 'Auto-Detect PC'),
                 ),
               ),
-              const SizedBox(width: 10),
+              const SizedBox(width: 8),
               Expanded(
                 child: OutlinedButton.icon(
                   style: OutlinedButton.styleFrom(
@@ -1790,12 +1894,12 @@ class _ConnectionSetupViewState extends State<ConnectionSetupView> {
                       ? null
                       : () async {
                           _ipController.text = '127.0.0.1';
-                          final ok = await widget.net.connect('127.0.0.1', 9090);
+                          final ok = await widget.net.connect('127.0.0.1', 9090, pin: _pinController.text.trim());
                           if (!mounted) return;
                           if (ok) widget.onConnected();
                         },
                   icon: const Icon(Icons.usb, size: 18),
-                  label: const Text('USB Cable (127.0.0.1)'),
+                  label: const Text('USB (127.0.0.1)'),
                 ),
               ),
             ],
@@ -1805,7 +1909,7 @@ class _ConnectionSetupViewState extends State<ConnectionSetupView> {
           // Discovered PCs List
           if (widget.net.discoveredDevices.isNotEmpty) ...[
             const Text(
-              'Discovered PC Servers on Network:',
+              'Discovered PC Servers (Wi-Fi / USB / Auto-Bridge):',
               style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.white70),
             ),
             const SizedBox(height: 6),
@@ -1823,7 +1927,7 @@ class _ConnectionSetupViewState extends State<ConnectionSetupView> {
                       onPressed: widget.net.isConnecting
                           ? null
                           : () async {
-                              final ok = await widget.net.connect(pc.ip, pc.port);
+                              final ok = await widget.net.connect(pc.ip, pc.port, pin: _pinController.text.trim());
                               if (!mounted) return;
                               if (ok) widget.onConnected();
                             },
@@ -1834,7 +1938,7 @@ class _ConnectionSetupViewState extends State<ConnectionSetupView> {
             const SizedBox(height: 14),
           ],
 
-          // Manual IP Connect Card
+          // Tri-Transport Direct IP + Port + PIN Auto-Bridge Card
           Container(
             padding: const EdgeInsets.all(14),
             decoration: BoxDecoration(
@@ -1846,7 +1950,7 @@ class _ConnectionSetupViewState extends State<ConnectionSetupView> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 const Text(
-                  'Direct Wi-Fi IP Connection:',
+                  'Direct Wi-Fi IP:Port + PIN Auto-Bridge (Firewall-Safe):',
                   style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: Colors.white70),
                 ),
                 const SizedBox(height: 10),
@@ -1858,13 +1962,13 @@ class _ConnectionSetupViewState extends State<ConnectionSetupView> {
                         controller: _ipController,
                         style: const TextStyle(fontSize: 13),
                         decoration: const InputDecoration(
-                          labelText: 'PC Local IP Address',
+                          labelText: 'PC Local IP',
                           isDense: true,
                           border: OutlineInputBorder(),
                         ),
                       ),
                     ),
-                    const SizedBox(width: 8),
+                    const SizedBox(width: 6),
                     Expanded(
                       flex: 1,
                       child: TextField(
@@ -1878,12 +1982,25 @@ class _ConnectionSetupViewState extends State<ConnectionSetupView> {
                         ),
                       ),
                     ),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      flex: 1,
+                      child: TextField(
+                        controller: _pinController,
+                        style: const TextStyle(fontSize: 13),
+                        decoration: const InputDecoration(
+                          labelText: 'PIN',
+                          isDense: true,
+                          border: OutlineInputBorder(),
+                        ),
+                      ),
+                    ),
                     const SizedBox(width: 8),
                     ElevatedButton(
                       style: ElevatedButton.styleFrom(
                         backgroundColor: const Color(0xFF00E5FF),
                         foregroundColor: Colors.black,
-                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
                       ),
                       onPressed: widget.net.isConnecting
                           ? null
@@ -1895,7 +2012,11 @@ class _ConnectionSetupViewState extends State<ConnectionSetupView> {
                                 });
                                 return;
                               }
-                              final ok = await widget.net.connect(_ipController.text.trim(), parsedPort);
+                              final ok = await widget.net.connect(
+                                _ipController.text.trim(),
+                                parsedPort,
+                                pin: _pinController.text.trim(),
+                              );
                               if (!mounted) return;
                               if (ok) widget.onConnected();
                             },

@@ -74,10 +74,13 @@ export class ConnectionManager {
   public lastConnectionError: string | null = null;
   public connectionStatusMessage = '';
 
+  public static readonly CLOUD_RELAY_HOST = 'ais-pre-wagmzzgimsj3rkh5tc4yb3-89008514509.asia-southeast1.run.app';
+
   // Broadcast channel for multi-tab zero-lag coordination
   private bc: BroadcastChannel | null = null;
   private ws: WebSocket | null = null;
   private localServerWs: WebSocket | null = null;
+  private cloudBridgeWs: WebSocket | null = null;
   private pingInterval: number | null = null;
   private listeners: Set<() => void> = new Set();
 
@@ -425,9 +428,63 @@ export class ConnectionManager {
       if (window.location.protocol !== 'https:') {
         this.connectLocalHostBridge(this.localIp || '127.0.0.1', this.serverPort || 9090);
       }
+
+      // Tri-Transport Auto-Bridge: when running locally on PC (e.g., inside AirCanvas.exe on 127.0.0.1:3005),
+      // also join the Cloud Relay room so if Windows Firewall or router AP isolation blocks LAN port 9090,
+      // the Android APK still pairs via PIN and strokes are forwarded to localServerWs (127.0.0.1:9090)!
+      if (window.location.hostname === '127.0.0.1' || window.location.hostname === 'localhost') {
+        this.connectCloudHostBridge(this.pairingPin);
+      }
     }
 
     this.notify();
+  }
+
+  private connectCloudHostBridge(pin: string): void {
+    if (typeof window === 'undefined') return;
+    try {
+      if (this.cloudBridgeWs) {
+        try {
+          this.cloudBridgeWs.onclose = null;
+          this.cloudBridgeWs.close();
+        } catch {}
+        this.cloudBridgeWs = null;
+      }
+      const hostName = encodeURIComponent('AirCanvas-PC-Host');
+      const cloudUrl = `wss://${ConnectionManager.CLOUD_RELAY_HOST}/ws?pin=${encodeURIComponent(pin)}&role=server&name=${hostName}&ip=${encodeURIComponent(this.localIp)}&port=${this.serverPort}`;
+      const cws = new WebSocket(cloudUrl);
+      cws.binaryType = 'arraybuffer';
+      this.cloudBridgeWs = cws;
+
+      cws.onopen = () => {
+        this.relayState = 'connected';
+        try {
+          cws.send(JSON.stringify({
+            type: 'register_host',
+            pin,
+            name: 'AirCanvas-PC-Host',
+            ip: this.localIp,
+            port: this.serverPort,
+          }));
+        } catch {}
+        this.notify();
+      };
+
+      cws.onmessage = (ev) => {
+        this.processIncomingSocketData(ev.data);
+        // Forward incoming binary/JSON stroke packets from Cloud Relay directly to local AirCanvasServer.exe (127.0.0.1:9090)
+        // so Windows native pen injection works even when LAN port 9090 is firewalled!
+        if (this.localServerWs && this.localServerWs.readyState === WebSocket.OPEN) {
+          if (ev.data instanceof ArrayBuffer) {
+            try { this.localServerWs.send(ev.data); } catch {}
+          } else if (typeof ev.data === 'string' && (ev.data.includes('pointer') || ev.data.includes('workArea') || ev.data.includes('action'))) {
+            try { this.localServerWs.send(ev.data); } catch {}
+          }
+        }
+      };
+
+      cws.onerror = () => {};
+    } catch {}
   }
 
   private connectLocalHostBridge(ip: string, port: number): void {
@@ -483,6 +540,13 @@ export class ConnectionManager {
         this.localServerWs.close();
       } catch {}
       this.localServerWs = null;
+    }
+    if (this.cloudBridgeWs) {
+      try {
+        this.cloudBridgeWs.onclose = null;
+        this.cloudBridgeWs.close();
+      } catch {}
+      this.cloudBridgeWs = null;
     }
     this.relayState = 'disconnected';
     this.state = 'disconnected';
@@ -1106,6 +1170,14 @@ export class ConnectionManager {
         modeType: 'wifi',
         timeoutMs: 2500,
       });
+      if (!window.location.host.includes(ConnectionManager.CLOUD_RELAY_HOST)) {
+        candidates.push({
+          url: `wss://${ConnectionManager.CLOUD_RELAY_HOST}/ws?pin=${encodeURIComponent(cleanPin)}&role=client&name=${encodeURIComponent(clientName)}&transport=wifi`,
+          label: `Auto-Bridge Cloud Relay (PIN: ${cleanPin})`,
+          modeType: 'wifi',
+          timeoutMs: 3000,
+        });
+      }
     }
 
     for (const cand of candidates) {
