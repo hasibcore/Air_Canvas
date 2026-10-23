@@ -1,6 +1,6 @@
 // ==============================================================================================
 // AirCanvasServer.cs - High-Performance Windows Native Input Server & Synthetic Pen Injector
-// Version: 2.0.2 PRO
+// Version: 2.0.3 PRO
 // Features:
 // - 100% Mobile Full-Screen Pad -> PC Software Working Area 1:1 Mapping
 // - Auto-Detect Active PC Software Window & Canvas Working Area (Photoshop, Krita, OneNote, etc.)
@@ -119,7 +119,7 @@ namespace AirCanvas.Server
 
     public class AirCanvasServer
     {
-        public const string VERSION = "2.0.2 PRO";
+        public const string VERSION = "2.0.3 PRO";
         public const int DEFAULT_PORT = 9090;
         public const int DISCOVERY_PORT = 9091;
 
@@ -1440,7 +1440,18 @@ namespace AirCanvas.Server
         public static bool IsWebSocketListening = false;
         public static bool IsUdpListening = false;
         public static readonly List<NetworkStream> _activeClients = new List<NetworkStream>();
+        public static readonly List<NetworkStream> _remoteTabletStreams = new List<NetworkStream>();
+        public static string LastConnectedTabletEndpoint = "";
+        public static long TotalPacketsReceived = 0;
         public static readonly object _clientsLock = new object();
+
+        public static int GetConnectedTabletCount()
+        {
+            lock (_clientsLock)
+            {
+                return _remoteTabletStreams.Count;
+            }
+        }
 
         private static void KillLingeringAirCanvasProcesses()
         {
@@ -1469,41 +1480,113 @@ namespace AirCanvas.Server
 
         public static void EnsureFirewallRules()
         {
-            Thread fwThread = new Thread(() =>
+            try
             {
-                try
+                string exePath = "";
+                try { exePath = Process.GetCurrentProcess().MainModule.FileName; } catch { }
+
+                List<string> cmds = new List<string>
                 {
-                    string[] cmds = new string[]
+                    "advfirewall firewall delete rule name=\"AirCanvas TCP 9090\"",
+                    "advfirewall firewall add rule name=\"AirCanvas TCP 9090\" dir=in action=allow protocol=TCP localport=9090 profile=any edge=yes",
+                    "advfirewall firewall delete rule name=\"AirCanvas Web 3005\"",
+                    "advfirewall firewall add rule name=\"AirCanvas Web 3005\" dir=in action=allow protocol=TCP localport=3000-3050 profile=any edge=yes",
+                    "advfirewall firewall delete rule name=\"AirCanvas UDP 9091\"",
+                    "advfirewall firewall add rule name=\"AirCanvas UDP 9091\" dir=in action=allow protocol=UDP localport=9091 profile=any edge=yes"
+                };
+
+                if (!string.IsNullOrEmpty(exePath))
+                {
+                    cmds.Add("advfirewall firewall delete rule name=\"AirCanvas App Binary\"");
+                    cmds.Add("advfirewall firewall add rule name=\"AirCanvas App Binary\" dir=in action=allow program=\"" + exePath + "\" enable=yes profile=any edge=yes");
+                }
+
+                bool needRunAs = false;
+                foreach (string args in cmds)
+                {
+                    try
                     {
-                        "advfirewall firewall add rule name=\"AirCanvas TCP 9090\" dir=in action=allow protocol=TCP localport=9090 profile=any",
-                        "advfirewall firewall add rule name=\"AirCanvas Web 3005\" dir=in action=allow protocol=TCP localport=3005 profile=any",
-                        "advfirewall firewall add rule name=\"AirCanvas UDP 9091\" dir=in action=allow protocol=UDP localport=9091 profile=any"
-                    };
-                    foreach (string args in cmds)
-                    {
-                        try
+                        ProcessStartInfo psi = new ProcessStartInfo
                         {
-                            ProcessStartInfo psi = new ProcessStartInfo
+                            FileName = "netsh",
+                            Arguments = args,
+                            CreateNoWindow = true,
+                            UseShellExecute = false,
+                            RedirectStandardOutput = true,
+                            RedirectStandardError = true
+                        };
+                        using (Process p = Process.Start(psi))
+                        {
+                            if (p != null)
                             {
-                                FileName = "netsh",
-                                Arguments = args,
-                                CreateNoWindow = true,
-                                UseShellExecute = false,
-                                RedirectStandardOutput = true,
-                                RedirectStandardError = true
-                            };
-                            using (Process p = Process.Start(psi))
-                            {
-                                if (p != null) p.WaitForExit(1500);
+                                p.WaitForExit(1500);
+                                if (args.Contains("add rule") && p.ExitCode != 0)
+                                {
+                                    needRunAs = true;
+                                }
                             }
                         }
-                        catch { }
                     }
+                    catch { }
                 }
-                catch { }
+
+                if (needRunAs)
+                {
+                    try
+                    {
+                        string combined = "netsh advfirewall firewall add rule name=\"AirCanvas TCP 9090\" dir=in action=allow protocol=TCP localport=9090 profile=any & " +
+                                          "netsh advfirewall firewall add rule name=\"AirCanvas Web 3005\" dir=in action=allow protocol=TCP localport=3000-3050 profile=any & " +
+                                          "netsh advfirewall firewall add rule name=\"AirCanvas UDP 9091\" dir=in action=allow protocol=UDP localport=9091 profile=any";
+                        ProcessStartInfo elevatedPsi = new ProcessStartInfo
+                        {
+                            FileName = "cmd.exe",
+                            Arguments = "/c \"" + combined + "\"",
+                            Verb = "runas",
+                            UseShellExecute = true,
+                            WindowStyle = ProcessWindowStyle.Hidden
+                        };
+                        using (Process p = Process.Start(elevatedPsi))
+                        {
+                            if (p != null) p.WaitForExit(4000);
+                        }
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+        }
+
+        public static void StartUsbAdbAutoReverse()
+        {
+            Thread adbThread = new Thread(() =>
+            {
+                string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+                string sdkAdb = Path.Combine(localAppData, @"Android\Sdk\platform-tools\adb.exe");
+                while (_isRunning)
+                {
+                    try
+                    {
+                        string adbCmd = File.Exists(sdkAdb) ? sdkAdb : "adb";
+                        ProcessStartInfo psi = new ProcessStartInfo
+                        {
+                            FileName = adbCmd,
+                            Arguments = "reverse tcp:9090 tcp:9090",
+                            CreateNoWindow = true,
+                            UseShellExecute = false,
+                            RedirectStandardOutput = true,
+                            RedirectStandardError = true
+                        };
+                        using (Process p = Process.Start(psi))
+                        {
+                            if (p != null) p.WaitForExit(1200);
+                        }
+                    }
+                    catch { }
+                    Thread.Sleep(5000);
+                }
             });
-            fwThread.IsBackground = true;
-            fwThread.Start();
+            adbThread.IsBackground = true;
+            adbThread.Start();
         }
 
         public static void StartWebSocketServer()
@@ -1511,6 +1594,7 @@ namespace AirCanvas.Server
             try
             {
                 EnsureFirewallRules();
+                StartUsbAdbAutoReverse();
                 KillLingeringAirCanvasProcesses();
                 _tcpListener = new TcpListener(IPAddress.Any, DEFAULT_PORT);
                 try
@@ -1587,6 +1671,11 @@ namespace AirCanvas.Server
                     if (_udpListener != null) { try { _udpListener.Close(); } catch { } }
                     _udpListener = new UdpClient(DISCOVERY_PORT);
                 }
+                try
+                {
+                    _udpListener.EnableBroadcast = true;
+                }
+                catch { }
                 IsUdpListening = true;
                 Thread udpThread = new Thread(() =>
                 {
@@ -1600,7 +1689,8 @@ namespace AirCanvas.Server
                             if (msg.Contains("DISCOVERY") || msg.Contains("PING"))
                             {
                                 string localIp = GetPrimaryLocalIp();
-                                string reply = "{\"app\":\"AirCanvas\",\"name\":\"" + Environment.MachineName + "\",\"ip\":\"" + localIp + "\",\"port\":" + DEFAULT_PORT + ",\"version\":\"" + VERSION + "\"}";
+                                string allIps = GetAllLocalIpsJsonArray();
+                                string reply = "{\"app\":\"AirCanvas\",\"name\":\"" + Environment.MachineName + "\",\"ip\":\"" + localIp + "\",\"allIps\":" + allIps + ",\"port\":" + DEFAULT_PORT + ",\"version\":\"" + VERSION + "\"}";
                                 byte[] replyBytes = Encoding.UTF8.GetBytes(reply);
                                 _udpListener.Send(replyBytes, replyBytes.Length, remoteEP);
                             }
@@ -1613,6 +1703,51 @@ namespace AirCanvas.Server
                 });
                 udpThread.IsBackground = true;
                 udpThread.Start();
+
+                // Active 1.2s UDP Broadcast Beacon so Android APK on the same Wi-Fi discovers PC automatically
+                Thread beaconThread = new Thread(() =>
+                {
+                    while (_isRunning)
+                    {
+                        try
+                        {
+                            string localIp = GetPrimaryLocalIp();
+                            string allIps = GetAllLocalIpsJsonArray();
+                            string beacon = "{\"app\":\"AirCanvas\",\"type\":\"BEACON\",\"name\":\"" + Environment.MachineName + "\",\"ip\":\"" + localIp + "\",\"allIps\":" + allIps + ",\"port\":" + DEFAULT_PORT + ",\"version\":\"" + VERSION + "\"}";
+                            byte[] beaconBytes = Encoding.UTF8.GetBytes(beacon);
+
+                            using (UdpClient broadcaster = new UdpClient())
+                            {
+                                broadcaster.EnableBroadcast = true;
+                                try
+                                {
+                                    broadcaster.Send(beaconBytes, beaconBytes.Length, new IPEndPoint(IPAddress.Broadcast, DISCOVERY_PORT));
+                                }
+                                catch { }
+
+                                List<string> ips = GetAllLocalIpsList();
+                                foreach (string ipStr in ips)
+                                {
+                                    if (ipStr == "127.0.0.1") continue;
+                                    string[] parts = ipStr.Split('.');
+                                    if (parts.Length == 4)
+                                    {
+                                        string bcastIp = parts[0] + "." + parts[1] + "." + parts[2] + ".255";
+                                        try
+                                        {
+                                            broadcaster.Send(beaconBytes, beaconBytes.Length, new IPEndPoint(IPAddress.Parse(bcastIp), DISCOVERY_PORT));
+                                        }
+                                        catch { }
+                                    }
+                                }
+                            }
+                        }
+                        catch { }
+                        Thread.Sleep(1200);
+                    }
+                });
+                beaconThread.IsBackground = true;
+                beaconThread.Start();
             }
             catch { }
         }
@@ -1668,10 +1803,19 @@ namespace AirCanvas.Server
         public static void HandleWebSocketStream(TcpClient client, NetworkStream stream, string request)
         {
             bool addedToActiveClients = false;
+            bool isRemoteTablet = false;
+            string remoteEndpointStr = "";
             try
             {
+                try { remoteEndpointStr = client.Client.RemoteEndPoint != null ? client.Client.RemoteEndPoint.ToString() : "Tablet"; } catch { remoteEndpointStr = "Tablet"; }
+
                 string key = "";
                 string[] lines = request.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None);
+                string firstLine = lines.Length > 0 ? lines[0] : "";
+                bool isServerRole = firstLine.IndexOf("role=server", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                    firstLine.IndexOf("role=probe", StringComparison.OrdinalIgnoreCase) >= 0;
+                isRemoteTablet = !isServerRole;
+
                 foreach (string line in lines)
                 {
                     if (line.StartsWith("Sec-WebSocket-Key:", StringComparison.OrdinalIgnoreCase))
@@ -1694,24 +1838,44 @@ namespace AirCanvas.Server
                 byte[] responseBytes = Encoding.UTF8.GetBytes(response);
                 stream.Write(responseBytes, 0, responseBytes.Length);
 
+                int tabletCount = 0;
                 lock (_clientsLock)
                 {
                     _activeClients.Add(stream);
                     addedToActiveClients = true;
+                    if (isRemoteTablet)
+                    {
+                        _remoteTabletStreams.Add(stream);
+                        LastConnectedTabletEndpoint = remoteEndpointStr;
+                    }
+                    tabletCount = _remoteTabletStreams.Count;
                 }
 
                 long joinTime = DateTime.UtcNow.Ticks / 10000;
-                Console.ForegroundColor = ConsoleColor.Green;
-                Console.WriteLine("[CONNECTED] Device paired: " + client.Client.RemoteEndPoint + " (Total active peers: " + _activeClients.Count + ")");
-                Console.ResetColor();
+                int peerCountForMsg = isRemoteTablet ? (tabletCount + 1) : (tabletCount > 0 ? tabletCount + 1 : 1);
 
-                SendWsTextMessage(stream, "{\"type\":\"room_joined\",\"role\":\"client\",\"peerCount\":" + _activeClients.Count + ",\"version\":\"" + VERSION + "\",\"timestamp\":" + joinTime + "}");
+                if (isRemoteTablet)
+                {
+                    Console.ForegroundColor = ConsoleColor.Green;
+                    Console.WriteLine("[CONNECTED] Tablet Device Paired: " + remoteEndpointStr + " (Active tablets: " + tabletCount + ")");
+                    Console.ResetColor();
+                }
+
+                SendWsTextMessage(stream, "{\"type\":\"room_joined\",\"role\":\"" + (isRemoteTablet ? "client" : "server") + "\",\"peerCount\":" + peerCountForMsg + ",\"version\":\"" + VERSION + "\",\"timestamp\":" + joinTime + "}");
                 int activeW = Math.Max(64, TargetScreen.Width);
                 int activeH = Math.Max(64, TargetScreen.Height);
                 string presetId = (ActiveWorkArea.PresetId ?? "auto");
                 SendWsTextMessage(stream, "{\"type\":\"workingAreaDetected\",\"workWidth\":" + activeW + ",\"workHeight\":" + activeH + ",\"appName\":\"" + presetId + "\",\"targetMode\":\"CANVAS\",\"targetAvailable\":true,\"canvasVerified\":true,\"requiresCalibration\":false}");
                 SendWsTextMessage(stream, "{\"type\":\"screen_sync\",\"screenWidth\":" + activeW + ",\"screenHeight\":" + activeH + ",\"timestamp\":" + joinTime + "}");
-                BroadcastWsTextMessage("{\"type\":\"peer_connected\",\"role\":\"client\",\"deviceName\":\"Android / Mobile Tablet\",\"transportType\":\"wifi\",\"peerCount\":" + _activeClients.Count + ",\"timestamp\":" + joinTime + "}", stream);
+
+                if (isRemoteTablet)
+                {
+                    BroadcastWsTextMessage("{\"type\":\"peer_connected\",\"role\":\"client\",\"deviceName\":\"Android / Mobile Tablet (" + remoteEndpointStr + ")\",\"transportType\":\"wifi\",\"peerCount\":" + peerCountForMsg + ",\"timestamp\":" + joinTime + "}", stream);
+                }
+                else if (tabletCount > 0)
+                {
+                    SendWsTextMessage(stream, "{\"type\":\"peer_connected\",\"role\":\"client\",\"deviceName\":\"Android / Mobile Tablet (" + LastConnectedTabletEndpoint + ")\",\"transportType\":\"wifi\",\"peerCount\":" + peerCountForMsg + ",\"timestamp\":" + joinTime + "}");
+                }
 
                 while (_isRunning && client.Connected)
                 {
@@ -1760,12 +1924,14 @@ namespace AirCanvas.Server
 
                     if (opcode == 0x1)
                     {
+                        TotalPacketsReceived++;
                         string json = Encoding.UTF8.GetString(payload);
                         ProcessJsonPacket(json, stream);
                         BroadcastWsTextMessage(json, stream);
                     }
                     else if (opcode == 0x2)
                     {
+                        TotalPacketsReceived++;
                         ProcessBinaryPacket(payload, payload.Length, stream, client);
                         BroadcastWsBinary(payload, stream);
                     }
@@ -1775,9 +1941,12 @@ namespace AirCanvas.Server
                     }
                 }
 
-                Console.ForegroundColor = ConsoleColor.Yellow;
-                Console.WriteLine("[DISCONNECTED] Device closed session: " + client.Client.RemoteEndPoint);
-                Console.ResetColor();
+                if (isRemoteTablet)
+                {
+                    Console.ForegroundColor = ConsoleColor.Yellow;
+                    Console.WriteLine("[DISCONNECTED] Tablet closed session: " + remoteEndpointStr);
+                    Console.ResetColor();
+                }
             }
             catch { }
             finally
@@ -1785,11 +1954,20 @@ namespace AirCanvas.Server
                 ReleaseStuckPointerOnDisconnect();
                 if (stream != null && addedToActiveClients)
                 {
+                    int remainingTablets = 0;
                     lock (_clientsLock)
                     {
                         _activeClients.Remove(stream);
+                        if (isRemoteTablet)
+                        {
+                            _remoteTabletStreams.Remove(stream);
+                        }
+                        remainingTablets = _remoteTabletStreams.Count;
                     }
-                    BroadcastWsTextMessage("{\"type\":\"peer_disconnected\",\"peerCount\":" + _activeClients.Count + ",\"timestamp\":" + (DateTime.UtcNow.Ticks / 10000) + "}", null);
+                    if (isRemoteTablet)
+                    {
+                        BroadcastWsTextMessage("{\"type\":\"peer_disconnected\",\"peerCount\":" + (remainingTablets + 1) + ",\"timestamp\":" + (DateTime.UtcNow.Ticks / 10000) + "}", null);
+                    }
                 }
                 try { client.Close(); } catch { }
             }
@@ -2066,9 +2244,41 @@ namespace AirCanvas.Server
 
         public static string GetPrimaryLocalIp()
         {
+            // 1. Query OS routing table via UDP socket to 8.8.8.8 so we always pick the real active Wi-Fi/LAN adapter
+            // and never accidentally pick VirtualBox (192.168.56.1) or WSL/Hyper-V (172.x.x.1)
+            try
+            {
+                using (Socket socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, 0))
+                {
+                    socket.Connect("8.8.8.8", 65530);
+                    IPEndPoint endPoint = socket.LocalEndPoint as IPEndPoint;
+                    if (endPoint != null && !IPAddress.IsLoopback(endPoint.Address))
+                    {
+                        string routedIp = endPoint.Address.ToString();
+                        if (!string.IsNullOrEmpty(routedIp) && routedIp != "0.0.0.0")
+                        {
+                            return routedIp;
+                        }
+                    }
+                }
+            }
+            catch { }
+
+            // 2. Fallback: scan DNS host addresses, preferring 192.168.x.x (excluding VirtualBox 192.168.56.1)
             try
             {
                 IPHostEntry host = Dns.GetHostEntry(Dns.GetHostName());
+                foreach (IPAddress ip in host.AddressList)
+                {
+                    if (ip.AddressFamily == AddressFamily.InterNetwork && !IPAddress.IsLoopback(ip))
+                    {
+                        string str = ip.ToString();
+                        if (str.StartsWith("192.168.") && !str.StartsWith("192.168.56."))
+                        {
+                            return str;
+                        }
+                    }
+                }
                 foreach (IPAddress ip in host.AddressList)
                 {
                     if (ip.AddressFamily == AddressFamily.InterNetwork && !IPAddress.IsLoopback(ip))
@@ -2085,9 +2295,14 @@ namespace AirCanvas.Server
             return "127.0.0.1";
         }
 
-        public static string GetAllLocalIpsJsonArray()
+        public static List<string> GetAllLocalIpsList()
         {
             List<string> ips = new List<string>();
+            string primary = GetPrimaryLocalIp();
+            if (!string.IsNullOrEmpty(primary) && primary != "127.0.0.1")
+            {
+                ips.Add(primary);
+            }
             try
             {
                 IPHostEntry host = Dns.GetHostEntry(Dns.GetHostName());
@@ -2108,6 +2323,12 @@ namespace AirCanvas.Server
             {
                 ips.Add("127.0.0.1");
             }
+            return ips;
+        }
+
+        public static string GetAllLocalIpsJsonArray()
+        {
+            List<string> ips = GetAllLocalIpsList();
             StringBuilder sb = new StringBuilder("[");
             for (int i = 0; i < ips.Count; i++)
             {

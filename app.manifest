@@ -1,12 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <assembly manifestVersion="1.0" xmlns="urn:schemas-microsoft-com:asm.v1">
-  <assemblyIdentity version="1.7.1.0" name="AirCanvas.Server" type="win32"/>
+  <assemblyIdentity version="2.0.3.0" name="AirCanvas.Server" type="win32"/>
   <description>Air Canvas Wireless Graphics Tablet - Windows Native Input Server</description>
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v2">
     <security>
       <requestedPrivileges xmlns="urn:schemas-microsoft-com:asm.v3">
-        <!-- Execution level as standard user or administrator -->
-        <requestedExecutionLevel level="asInvoker" uiAccess="false" />
+        <!-- Administrator privilege guarantees Windows Defender Firewall rules (TCP 9090/3005, UDP 9091) and Synthetic Pen injection work across all apps -->
+        <requestedExecutionLevel level="requireAdministrator" uiAccess="false" />
       </requestedPrivileges>
     </security>
   </trustInfo>

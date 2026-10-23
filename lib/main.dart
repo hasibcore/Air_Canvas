@@ -20,7 +20,7 @@ class AirCanvasApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Air Canvas v2.0.2',
+      title: 'Air Canvas v2.0.3',
       debugShowCheckedModeBanner: false,
       theme: ThemeData.dark().copyWith(
         scaffoldBackgroundColor: const Color(0xFF0A0A14),
@@ -177,15 +177,16 @@ class DiscoveredPC {
 // WEBSOCKET & UDP AUTO-DISCOVERY NETWORK MANAGER
 // ==============================================================================
 class NetworkConnectionManager extends ChangeNotifier {
-  static const String kCloudRelayHost = 'ais-pre-wagmzzgimsj3rkh5tc4yb3-89008514509.asia-southeast1.run.app';
   WebSocket? _socket;
   RawDatagramSocket? _udpSocket;
+  RawDatagramSocket? _beaconSocket;
   bool isConnected = false;
   bool isConnecting = false;
   bool isScanning = false;
-  String statusMessage = 'Ready to Connect (Auto-Bridge Wi-Fi / USB / PIN)';
+  String statusMessage = 'Auto-Detecting PC on Wi-Fi & USB...';
   String connectedIp = '';
   int connectedPort = 9090;
+  String detectedSubnetHint = '192.168.1.100';
   String pairingPin = '1234';
   String activeTransport = 'wifi';
   int latencyMs = 0;
@@ -256,7 +257,63 @@ class NetworkConnectionManager extends ChangeNotifier {
     } catch (_) {}
   }
 
-  Future<void> scanLocalNetwork() async {
+  Future<void> startPassiveBeaconListener() async {
+    if (_beaconSocket != null) return;
+    try {
+      _beaconSocket = await RawDatagramSocket.bind(
+        InternetAddress.anyIPv4,
+        9091,
+        reuseAddress: true,
+      );
+      _beaconSocket!.broadcastEnabled = true;
+      _beaconSocket!.listen((RawSocketEvent event) {
+        if (event == RawSocketEvent.read && _beaconSocket != null) {
+          final dg = _beaconSocket!.receive();
+          if (dg != null) {
+            _handleIncomingUdpDiscoveryPacket(dg, autoConnect: true);
+          }
+        }
+      });
+    } catch (_) {}
+  }
+
+  void _handleIncomingUdpDiscoveryPacket(Datagram dg, {bool autoConnect = true}) {
+    try {
+      final msg = utf8.decode(dg.data).trim();
+      final Map<String, dynamic> data = jsonDecode(msg);
+      if (data['app'] == 'AirCanvas') {
+        String ip = dg.address.address;
+        if ((ip.isEmpty || ip == '0.0.0.0') && data['ip'] is String) {
+          ip = data['ip'] as String;
+        }
+        final int port = (data['port'] is int) ? (data['port'] as int) : 9090;
+        final String name = (data['name'] is String && (data['name'] as String).isNotEmpty)
+            ? '${data['name']} ($ip)'
+            : 'Windows PC ($ip)';
+
+        if (ip.isNotEmpty && ip != '0.0.0.0' && ip != '127.0.0.1') {
+          detectedSubnetHint = ip;
+          if (!discoveredDevices.any((d) => d.ip == ip)) {
+            discoveredDevices.insert(
+              0,
+              DiscoveredPC(
+                name: name,
+                ip: ip,
+                port: port,
+                latencyMs: 2,
+              ),
+            );
+            notifyListeners();
+          }
+          if (autoConnect && !isConnected && !isConnecting) {
+            connect(ip, port, pin: pairingPin);
+          }
+        }
+      }
+    } catch (_) {}
+  }
+
+  Future<void> scanLocalNetwork({bool autoConnect = true}) async {
     if (isScanning) return;
     isScanning = true;
     discoveredDevices.clear();
@@ -265,73 +322,103 @@ class NetworkConnectionManager extends ChangeNotifier {
     notifyListeners();
 
     try {
+      // 1. Check USB Cable (127.0.0.1:9090 and 127.0.0.1:3005) first for instant 1ms USB connection
+      await _probeHost('127.0.0.1', 9090, timeoutMs: 350);
+      if (discoveredDevices.isEmpty) {
+        await _probeHost('127.0.0.1', 3005, timeoutMs: 300);
+      }
+      if (autoConnect && discoveredDevices.isNotEmpty && !isConnected && !isConnecting) {
+        final firstUsb = discoveredDevices.first;
+        isScanning = false;
+        notifyListeners();
+        await connect(firstUsb.ip, firstUsb.port, pin: pairingPin);
+        return;
+      }
+
+      // 2. Open UDP discovery socket & broadcast DISCOVERY_PING across all Wi-Fi subnets
       _udpSocket?.close();
       _udpSocket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
       _udpSocket!.broadcastEnabled = true;
 
       _udpSocket!.listen((RawSocketEvent event) {
-        if (event == RawSocketEvent.read) {
+        if (event == RawSocketEvent.read && _udpSocket != null) {
           final dg = _udpSocket!.receive();
           if (dg != null) {
-            try {
-              final msg = utf8.decode(dg.data).trim();
-              final Map<String, dynamic> data = jsonDecode(msg);
-              if (data['app'] == 'AirCanvas') {
-                final String ip = dg.address.address;
-                final int port = data['port'] ?? 9090;
-                final String name = data['name'] ?? 'Windows PC ($ip)';
-
-                if (!discoveredDevices.any((d) => d.ip == ip)) {
-                  discoveredDevices.add(DiscoveredPC(
-                    name: name,
-                    ip: ip,
-                    port: port,
-                    latencyMs: 2,
-                  ));
-                  notifyListeners();
-                }
-              }
-            } catch (_) {}
+            _handleIncomingUdpDiscoveryPacket(dg, autoConnect: autoConnect);
           }
         }
       });
 
       final probe = utf8.encode(jsonEncode({'type': 'DISCOVERY_PING', 'app': 'AirCanvas'}));
-      try {
-        _udpSocket!.send(probe, InternetAddress('255.255.255.255'), 9091);
-      } catch (_) {}
-
       final interfaces = await NetworkInterface.list(type: InternetAddressType.IPv4);
-      final List<Future<void>> scanFutures = [];
-
-      // 1. Probe localhost (USB ADB reverse tcp:9090 tcp:9090 and tcp:3005)
-      scanFutures.add(_probeHost('127.0.0.1', 9090));
-      scanFutures.add(_probeHost('127.0.0.1', 3005));
-
-      // 2. Probe Cloud Relay PIN Bridge so PC Host is always discoverable even if Firewall blocks LAN port 9090
-      scanFutures.add(_probeCloudBridge(pairingPin));
+      final List<String> subnets = [];
+      final Set<String> ownIps = {};
 
       for (final iface in interfaces) {
         for (final addr in iface.addresses) {
           if (!addr.isLoopback) {
+            ownIps.add(addr.address);
             final parts = addr.address.split('.');
             if (parts.length == 4) {
               final subnet = '${parts[0]}.${parts[1]}.${parts[2]}';
-              try {
-                _udpSocket?.send(probe, InternetAddress('$subnet.255'), 9091);
-              } catch (_) {}
-
-              for (int i = 1; i <= 254; i++) {
-                final targetIp = '$subnet.$i';
-                if (targetIp == addr.address) continue;
-                scanFutures.add(_probeHost(targetIp, 9090));
+              if (!subnets.contains(subnet)) {
+                subnets.add(subnet);
+                if (detectedSubnetHint == '192.168.1.100') {
+                  detectedSubnetHint = '$subnet.100';
+                }
               }
             }
           }
         }
       }
 
-      await Future.wait(scanFutures).timeout(const Duration(seconds: 3), onTimeout: () => []);
+      // Send UDP broadcast pings 3 times so Wi-Fi packet loss never drops discovery
+      for (int attempt = 0; attempt < 3; attempt++) {
+        try {
+          _udpSocket?.send(probe, InternetAddress('255.255.255.255'), 9091);
+        } catch (_) {}
+        for (final subnet in subnets) {
+          try {
+            _udpSocket?.send(probe, InternetAddress('$subnet.255'), 9091);
+          } catch (_) {}
+        }
+        await Future.delayed(const Duration(milliseconds: 140));
+        if (discoveredDevices.isNotEmpty && autoConnect && (isConnected || isConnecting)) {
+          return;
+        }
+      }
+
+      // 3. Batched TCP port 9090 scan (24 hosts per batch so Android's socket table is never overwhelmed)
+      final List<int> hostOrder = [
+        for (int i = 100; i <= 135; i++) i,
+        for (int i = 2; i <= 55; i++) i,
+        for (int i = 56; i <= 99; i++) i,
+        for (int i = 136; i <= 199; i++) i,
+        for (int i = 200; i <= 254; i++) i,
+        1,
+      ];
+
+      for (final subnet in subnets) {
+        for (int offset = 0; offset < hostOrder.length; offset += 24) {
+          if (isConnected || (autoConnect && discoveredDevices.isNotEmpty)) break;
+          final batch = hostOrder.skip(offset).take(24);
+          final List<Future<void>> batchFutures = [];
+          for (final hostNum in batch) {
+            final targetIp = '$subnet.$hostNum';
+            if (ownIps.contains(targetIp)) continue;
+            batchFutures.add(_probeHost(targetIp, 9090, timeoutMs: 380));
+          }
+          await Future.wait(batchFutures);
+        }
+      }
+
+      if (autoConnect && discoveredDevices.isNotEmpty && !isConnected && !isConnecting) {
+        final target = discoveredDevices.first;
+        isScanning = false;
+        notifyListeners();
+        await connect(target.ip, target.port, pin: pairingPin);
+        return;
+      }
     } catch (e) {
       lastError = 'Network scan error: $e';
     } finally {
@@ -340,47 +427,31 @@ class NetworkConnectionManager extends ChangeNotifier {
       } catch (_) {}
       _udpSocket = null;
       isScanning = false;
-      if (discoveredDevices.isEmpty) {
-        statusMessage = 'No PC auto-detected. Enter PC IP or tap USB Cable (127.0.0.1).';
+      if (isConnected) {
+        statusMessage = 'Connected ($connectedIp:$connectedPort) • 1:1 ${selectedPreset.shortLabel}';
+      } else if (discoveredDevices.isEmpty) {
+        statusMessage = 'Enter PC IP shown on your PC window (Port 9090) or tap USB.';
       } else {
-        statusMessage = 'Found ${discoveredDevices.length} PC Server(s)! Tap to connect.';
+        statusMessage = 'Found ${discoveredDevices.length} PC Server(s)! Tap Connect.';
       }
       notifyListeners();
     }
   }
 
-  Future<void> _probeHost(String ip, int port) async {
+  Future<void> _probeHost(String ip, int port, {int timeoutMs = 380}) async {
     try {
       final sw = Stopwatch()..start();
-      final socket = await Socket.connect(ip, port, timeout: const Duration(milliseconds: 260));
+      final socket = await Socket.connect(ip, port, timeout: Duration(milliseconds: timeoutMs));
       sw.stop();
       socket.destroy();
+      if (ip != '127.0.0.1') {
+        detectedSubnetHint = ip;
+      }
       if (!discoveredDevices.any((d) => d.ip == ip)) {
         discoveredDevices.add(DiscoveredPC(
           name: ip == '127.0.0.1' ? 'USB Cable Server (ADB)' : 'AirCanvas PC ($ip)',
           ip: ip,
           port: port,
-          latencyMs: sw.elapsedMilliseconds,
-        ));
-        notifyListeners();
-      }
-    } catch (_) {}
-  }
-
-  Future<void> _probeCloudBridge(String pin) async {
-    try {
-      final cleanPin = pin.trim().isEmpty ? '1234' : pin.trim();
-      final sw = Stopwatch()..start();
-      final ws = await WebSocket.connect(
-        'wss://$kCloudRelayHost/ws?pin=$cleanPin&role=client&name=Android-Scanner',
-      ).timeout(const Duration(milliseconds: 1800));
-      sw.stop();
-      await ws.close();
-      if (!discoveredDevices.any((d) => d.ip == 'auto-bridge')) {
-        discoveredDevices.add(DiscoveredPC(
-          name: 'PC Auto-Bridge (PIN: $cleanPin • Wi-Fi / USB / Cloud)',
-          ip: 'auto-bridge',
-          port: 9090,
           latencyMs: sw.elapsedMilliseconds.clamp(1, 999),
         ));
         notifyListeners();
@@ -389,76 +460,86 @@ class NetworkConnectionManager extends ChangeNotifier {
   }
 
   Future<bool> connect(String ip, int port, {String? pin}) async {
-    final cleanIp = ip.trim().isEmpty ? 'auto-bridge' : ip.trim();
+    String cleanIp = ip.trim();
+    int targetPort = port;
+
+    // Strip any accidental protocol prefix or path
+    cleanIp = cleanIp.replaceFirst(RegExp(r'^(wss?|https?)://', caseSensitive: false), '');
+    cleanIp = cleanIp.split('/').first.trim();
+    if (cleanIp.contains(':')) {
+      final parts = cleanIp.split(':');
+      cleanIp = parts[0].trim();
+      final parsedP = int.tryParse(parts[1].trim());
+      if (parsedP != null && parsedP >= 1 && parsedP <= 65535) {
+        targetPort = parsedP;
+      }
+    }
+
+    if (cleanIp.isEmpty) {
+      if (discoveredDevices.isNotEmpty) {
+        cleanIp = discoveredDevices.first.ip;
+        targetPort = discoveredDevices.first.port;
+      } else {
+        lastError = 'Please enter the PC Local IP shown in your PC AirCanvas window.';
+        notifyListeners();
+        return false;
+      }
+    }
+
     final cleanPin = (pin ?? pairingPin).trim().isEmpty ? '1234' : (pin ?? pairingPin).trim();
     pairingPin = cleanPin;
 
     await disconnect();
     isConnecting = true;
     lastError = '';
-    statusMessage = 'Auto-Bridging to PC ($cleanIp:$port • PIN $cleanPin)...';
+    statusMessage = 'Connecting to PC ($cleanIp:$targetPort)...';
     notifyListeners();
 
-    final List<Map<String, String>> candidates = [];
-    final bool isDirectIp = cleanIp != 'auto-bridge' && cleanIp != 'cloud' && cleanIp != 'relay';
+    final String transportTag = cleanIp == '127.0.0.1' ? 'usb' : 'wifi';
+    final List<Map<String, String>> candidates = [
+      {
+        'url': 'ws://$cleanIp:$targetPort/aircanvas?pin=$cleanPin&role=client&name=Android-APK&transport=$transportTag',
+        'label': '$cleanIp:$targetPort',
+        'transport': transportTag,
+      },
+      {
+        'url': 'ws://$cleanIp:$targetPort',
+        'label': '$cleanIp:$targetPort',
+        'transport': transportTag,
+      },
+    ];
 
-    if (isDirectIp) {
-      final String transportTag = cleanIp == '127.0.0.1' ? 'usb' : 'wifi';
+    if (targetPort != 9090) {
       candidates.add({
-        'url': 'ws://$cleanIp:$port/aircanvas?pin=$cleanPin&role=client&name=Android-APK&transport=$transportTag',
-        'label': '$cleanIp:$port',
+        'url': 'ws://$cleanIp:9090/aircanvas?pin=$cleanPin&role=client&name=Android-APK&transport=$transportTag',
+        'label': '$cleanIp:9090',
         'transport': transportTag,
       });
+    }
+    if (targetPort != 3005) {
       candidates.add({
-        'url': 'ws://$cleanIp:$port',
-        'label': '$cleanIp:$port',
+        'url': 'ws://$cleanIp:3005/ws?pin=$cleanPin&role=client&name=Android-APK&transport=$transportTag',
+        'label': '$cleanIp:3005',
         'transport': transportTag,
       });
-      if (port != 3005) {
-        candidates.add({
-          'url': 'ws://$cleanIp:3005/ws?pin=$cleanPin&role=client&name=Android-APK&transport=$transportTag',
-          'label': '$cleanIp:3005 (PC Desktop Bridge)',
-          'transport': transportTag,
-        });
-      }
-      if (cleanIp != '127.0.0.1') {
-        candidates.add({
-          'url': 'ws://127.0.0.1:9090/aircanvas?pin=$cleanPin&role=client&name=Android-APK&transport=usb',
-          'label': '127.0.0.1:9090 (USB Direct)',
-          'transport': 'usb',
-        });
-      }
-    } else {
-      // Try USB 127.0.0.1 first in case USB cable is connected
+    }
+    if (cleanIp != '127.0.0.1') {
       candidates.add({
         'url': 'ws://127.0.0.1:9090/aircanvas?pin=$cleanPin&role=client&name=Android-APK&transport=usb',
-        'label': '127.0.0.1:9090 (USB Direct)',
+        'label': '127.0.0.1:9090 (USB)',
         'transport': 'usb',
       });
     }
 
-    // Always append Cloud Relay PIN Auto-Bridge so if Windows Firewall or router AP isolation blocks port 9090,
-    // the Android APK still connects to the PC and injects strokes seamlessly!
-    candidates.add({
-      'url': 'wss://$kCloudRelayHost/ws?pin=$cleanPin&role=client&name=Android-APK&transport=wifi',
-      'label': 'Auto-Bridge PIN $cleanPin',
-      'transport': 'cloud-bridge',
-    });
-    candidates.add({
-      'url': 'wss://$kCloudRelayHost/aircanvas?pin=$cleanPin&role=client&name=Android-APK&transport=wifi',
-      'label': 'Auto-Bridge Fallback PIN $cleanPin',
-      'transport': 'cloud-bridge',
-    });
-
     WebSocket? sock;
-    String connectedLabel = '$cleanIp:$port';
-    String selectedTransport = 'wifi';
+    String connectedLabel = '$cleanIp:$targetPort';
+    String selectedTransport = transportTag;
 
     for (final cand in candidates) {
       try {
-        statusMessage = 'Trying ${cand['label']}...';
+        statusMessage = 'Connecting to ${cand['label']}...';
         notifyListeners();
-        final int timeoutMs = cand['transport'] == 'cloud-bridge' ? 3200 : 1400;
+        final int timeoutMs = cand['label']!.contains('127.0.0.1') && cleanIp != '127.0.0.1' ? 900 : 2800;
         sock = await WebSocket.connect(cand['url']!).timeout(Duration(milliseconds: timeoutMs));
         connectedLabel = cand['label']!;
         selectedTransport = cand['transport']!;
@@ -471,8 +552,8 @@ class NetworkConnectionManager extends ChangeNotifier {
     if (sock == null) {
       isConnected = false;
       isConnecting = false;
-      lastError = 'Could not reach PC ($cleanIp:$port or PIN $cleanPin). Check Wi-Fi/Internet and ensure AirCanvas is open on PC.';
-      statusMessage = 'Connection failed';
+      lastError = 'Could not reach PC at $cleanIp:$targetPort. Make sure AirCanvas.exe is open on PC and both devices are on the same Wi-Fi (or click "Unblock Firewall & USB" on PC).';
+      statusMessage = 'Connection failed ($cleanIp:$targetPort)';
       notifyListeners();
       return false;
     }
@@ -484,8 +565,9 @@ class NetworkConnectionManager extends ChangeNotifier {
       isConnected = true;
       isConnecting = false;
       activeTransport = selectedTransport;
-      connectedIp = isDirectIp ? cleanIp : 'PIN:$cleanPin';
-      connectedPort = port;
+      connectedIp = cleanIp;
+      connectedPort = targetPort;
+      detectedSubnetHint = cleanIp;
       statusMessage = 'Connected ($connectedLabel) • 1:1 ${selectedPreset.shortLabel}';
       notifyListeners();
 
@@ -762,9 +844,10 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
     super.initState();
     _applyOrientationLock(true);
     _net.addListener(_onNetUpdate);
-    Future.delayed(const Duration(milliseconds: 300), () {
+    _net.startPassiveBeaconListener();
+    Future.delayed(const Duration(milliseconds: 250), () {
       if (!mounted) return;
-      _net.scanLocalNetwork();
+      _net.scanLocalNetwork(autoConnect: true);
     });
   }
 
@@ -1758,23 +1841,38 @@ class ConnectionSetupView extends StatefulWidget {
 }
 
 class _ConnectionSetupViewState extends State<ConnectionSetupView> {
-  final TextEditingController _ipController = TextEditingController(text: '192.168.0.100');
+  final TextEditingController _ipController = TextEditingController(text: '192.168.1.100');
   final TextEditingController _portController = TextEditingController(text: '9090');
   final TextEditingController _pinController = TextEditingController(text: '1234');
+  bool _userEditedIp = false;
 
   @override
   void initState() {
     super.initState();
     widget.net.addListener(_onNetChanged);
-    if (widget.net.connectedIp.isNotEmpty && !widget.net.connectedIp.startsWith('PIN:')) {
+    if (widget.net.connectedIp.isNotEmpty) {
       _ipController.text = widget.net.connectedIp;
+    } else if (widget.net.discoveredDevices.isNotEmpty) {
+      _ipController.text = widget.net.discoveredDevices.first.ip;
+    } else {
+      _ipController.text = widget.net.detectedSubnetHint;
     }
     _portController.text = widget.net.connectedPort.toString();
     _pinController.text = widget.net.pairingPin;
   }
 
   void _onNetChanged() {
-    if (mounted) setState(() {});
+    if (!mounted) return;
+    if (!_userEditedIp) {
+      if (widget.net.connectedIp.isNotEmpty) {
+        _ipController.text = widget.net.connectedIp;
+      } else if (widget.net.discoveredDevices.isNotEmpty) {
+        _ipController.text = widget.net.discoveredDevices.first.ip;
+      } else if (widget.net.detectedSubnetHint.isNotEmpty) {
+        _ipController.text = widget.net.detectedSubnetHint;
+      }
+    }
+    setState(() {});
   }
 
   @override
@@ -1793,7 +1891,7 @@ class _ConnectionSetupViewState extends State<ConnectionSetupView> {
       appBar: AppBar(
         backgroundColor: const Color(0xFF121222),
         title: const Text(
-          'Air Canvas v2.0.2 — Auto-Bridge Connect & PC Working Area',
+          'Air Canvas v2.0.3 — Connect & PC Working Area',
           style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
         ),
         actions: [
@@ -1960,6 +2058,7 @@ class _ConnectionSetupViewState extends State<ConnectionSetupView> {
                       flex: 3,
                       child: TextField(
                         controller: _ipController,
+                        onChanged: (_) => _userEditedIp = true,
                         style: const TextStyle(fontSize: 13),
                         decoration: const InputDecoration(
                           labelText: 'PC Local IP',

@@ -1,4 +1,4 @@
-name: Build and Release AirCanvas v2.0.2
+name: Build and Release AirCanvas v2.0.3
 
 on:
   push:
@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   build-windows:
-    name: Build Windows v2.0.2 Release (.exe + Web Studio)
+    name: Build Windows v2.0.3 Release (.exe + Web Studio)
     runs-on: windows-latest
     steps:
       - name: Checkout repository
@@ -56,7 +56,7 @@ jobs:
 
 
   build-android:
-    name: Build Android v2.0.2 APK (.apk)
+    name: Build Android v2.0.3 APK (.apk)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -114,8 +114,8 @@ jobs:
       - name: Install dependencies
         run: flutter pub get
 
-      - name: Build Android Release APK (v2.0.2)
-        run: flutter build apk --release --build-name=2.0.2 --build-number=202
+      - name: Build Android Release APK (v2.0.3)
+        run: flutter build apk --release --build-name=2.0.3 --build-number=203
 
       - name: Align and Sign APK with v1, v2, and v3 Signature Schemes
         run: |
@@ -159,7 +159,7 @@ jobs:
           path: AirCanvas-release.apk
 
   release:
-    name: Create GitHub Release (v2.0.2)
+    name: Create GitHub Release (v2.0.3)
     needs: [build-windows, build-android]
     if: always() && (needs.build-windows.result == 'success' || needs.build-android.result == 'success')
     runs-on: ubuntu-latest
@@ -177,8 +177,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          tag_name: ${{ (github.ref_type == 'tag' && github.ref_name) || 'v2.0.2' }}
-          name: AirCanvas ${{ (github.ref_type == 'tag' && github.ref_name) || 'v2.0.2' }} - Tri-Transport Dual-Device Auto-Bridge & 1:1 PC Working Area
+          tag_name: ${{ (github.ref_type == 'tag' && github.ref_name) || 'v2.0.3' }}
+          name: AirCanvas ${{ (github.ref_type == 'tag' && github.ref_name) || 'v2.0.3' }} - Auto-Connect Dual-Device Host & 1:1 PC Working Area
           files: |
             release-assets/*
           draft: false

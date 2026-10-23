@@ -424,16 +424,10 @@ export class ConnectionManager {
         console.warn('WebSocket relay error', err);
       }
 
-      // Also bridge directly to local AirCanvasServer.exe on ws://127.0.0.1:9090 or ws://<localIp>:<serverPort> when on HTTP
-      if (window.location.protocol !== 'https:') {
+      // Also bridge directly to local AirCanvasServer.exe on ws://127.0.0.1:9090 when running on Vite/Node (port 3000)
+      // Note: When running inside AirCanvas.exe (port 3005), this.ws on port 3005 is already handled directly by AirCanvasServer!
+      if (window.location.protocol !== 'https:' && window.location.port !== '3005') {
         this.connectLocalHostBridge(this.localIp || '127.0.0.1', this.serverPort || 9090);
-      }
-
-      // Tri-Transport Auto-Bridge: when running locally on PC (e.g., inside AirCanvas.exe on 127.0.0.1:3005),
-      // also join the Cloud Relay room so if Windows Firewall or router AP isolation blocks LAN port 9090,
-      // the Android APK still pairs via PIN and strokes are forwarded to localServerWs (127.0.0.1:9090)!
-      if (window.location.hostname === '127.0.0.1' || window.location.hostname === 'localhost') {
-        this.connectCloudHostBridge(this.pairingPin);
       }
     }
 
