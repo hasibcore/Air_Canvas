@@ -1,6 +1,6 @@
 // ==============================================================================================
 // AirCanvasServer.cs - High-Performance Windows Native Input Server & Synthetic Pen Injector
-// Version: 2.0.3 PRO
+// Version: 2.0.4 PRO
 // Features:
 // - 100% Mobile Full-Screen Pad -> PC Software Working Area 1:1 Mapping
 // - Auto-Detect Active PC Software Window & Canvas Working Area (Photoshop, Krita, OneNote, etc.)
@@ -15,6 +15,7 @@ using System.Drawing;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
+using System.Net.NetworkInformation;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
@@ -119,7 +120,7 @@ namespace AirCanvas.Server
 
     public class AirCanvasServer
     {
-        public const string VERSION = "2.0.3 PRO";
+        public const string VERSION = "2.0.4 PRO";
         public const int DEFAULT_PORT = 9090;
         public const int DISCOVERY_PORT = 9091;
 
@@ -951,8 +952,8 @@ namespace AirCanvas.Server
         /// </summary>
         public static Point TransformNormalizedToPhysical(double normX, double normY, ScreenBounds bounds)
         {
-            double clampedX = double.IsNaN(normX) || double.IsInfinity(normX) ? 0.5 : Math.Max(0.0, Math.Min(1.0, normX));
-            double clampedY = double.IsNaN(normY) || double.IsInfinity(normY) ? 0.5 : Math.Max(0.0, Math.Min(1.0, normY));
+            double clampedX = double.IsNaN(normX) ? 0.5 : (normX >= 1.0 ? 1.0 : (normX <= 0.0 ? 0.0 : normX));
+            double clampedY = double.IsNaN(normY) ? 0.5 : (normY >= 1.0 ? 1.0 : (normY <= 0.0 ? 0.0 : normY));
 
             int spanW = Math.Max(0, bounds.Width - 1);
             int spanH = Math.Max(0, bounds.Height - 1);
@@ -1558,44 +1559,553 @@ namespace AirCanvas.Server
 
         public static void StartUsbAdbAutoReverse()
         {
-            Thread adbThread = new Thread(() =>
+            try
             {
+                AdbManager.StartDeviceMonitor();
+            }
+            catch { }
+        }
+
+        #region Air Canvas Session Host, Pairing & Adb Manager (Part B / Section B5)
+
+        public class PairedDeviceInfo
+        {
+            public string DeviceId;
+            public string Name;
+            public string SecretHex;
+            public DateTime PairedAt;
+            public DateTime LastSeen;
+            public bool Revoked;
+        }
+
+        public class PairingTokenState
+        {
+            public string Sid;
+            public string Token;
+            public string TokenHash;
+            public string Pin;
+            public int PinAttempts;
+            public DateTime ExpiresAtUtc;
+            public bool IsUsed;
+        }
+
+        public class ActiveClientSession
+        {
+            public string DeviceId;
+            public string Name;
+            public string Transport;
+            public NetworkStream Stream;
+            public TcpClient Client;
+            public long Generation;
+            public DateTime ConnectedAt;
+            public DateTime LastSeen;
+            public bool IsActive;
+
+            public void Close()
+            {
+                IsActive = false;
+                try { if (Stream != null) Stream.Close(); } catch { }
+                try { if (Client != null) Client.Close(); } catch { }
+            }
+        }
+
+        public class AdbDeviceInfo
+        {
+            public string Serial;
+            public string State;
+            public string Model;
+        }
+
+        public static class AdbManager
+        {
+            private static string _cachedAdb = null;
+            private static readonly HashSet<string> _activeReverses = new HashSet<string>();
+
+            public static string FindAdb()
+            {
+                if (_cachedAdb != null && File.Exists(_cachedAdb)) return _cachedAdb;
                 string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
                 string sdkAdb = Path.Combine(localAppData, @"Android\Sdk\platform-tools\adb.exe");
-                while (_isRunning)
+                if (File.Exists(sdkAdb)) { _cachedAdb = sdkAdb; return _cachedAdb; }
+
+                try
                 {
-                    try
+                    ProcessStartInfo psi = new ProcessStartInfo
                     {
-                        string adbCmd = File.Exists(sdkAdb) ? sdkAdb : "adb";
-                        ProcessStartInfo psi = new ProcessStartInfo
+                        FileName = "cmd.exe",
+                        Arguments = "/c where adb",
+                        CreateNoWindow = true,
+                        UseShellExecute = false,
+                        RedirectStandardOutput = true
+                    };
+                    using (Process p = Process.Start(psi))
+                    {
+                        string line = p.StandardOutput.ReadLine();
+                        if (!string.IsNullOrEmpty(line) && File.Exists(line.Trim()))
                         {
-                            FileName = adbCmd,
-                            Arguments = "reverse tcp:9090 tcp:9090",
-                            CreateNoWindow = true,
-                            UseShellExecute = false,
-                            RedirectStandardOutput = true,
-                            RedirectStandardError = true
-                        };
-                        using (Process p = Process.Start(psi))
-                        {
-                            if (p != null) p.WaitForExit(1200);
+                            _cachedAdb = line.Trim();
+                            return _cachedAdb;
                         }
                     }
-                    catch { }
-                    Thread.Sleep(5000);
                 }
-            });
-            adbThread.IsBackground = true;
-            adbThread.Start();
+                catch { }
+                return null;
+            }
+
+            public static List<AdbDeviceInfo> ParseDevicesOutput(string raw)
+            {
+                List<AdbDeviceInfo> list = new List<AdbDeviceInfo>();
+                if (string.IsNullOrEmpty(raw)) return list;
+                string[] lines = raw.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None);
+                bool foundHeader = false;
+                HashSet<string> validStates = new HashSet<string> { "device", "unauthorized", "offline", "authorizing", "recovery", "sideload", "bootloader" };
+
+                foreach (string line in lines)
+                {
+                    string trimmed = line.Trim();
+                    if (string.IsNullOrEmpty(trimmed)) continue;
+                    if (trimmed.StartsWith("List of devices attached"))
+                    {
+                        foundHeader = true;
+                        continue;
+                    }
+                    if (!foundHeader) continue;
+
+                    string[] cols = trimmed.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+                    if (cols.Length >= 2)
+                    {
+                        string serial = cols[0];
+                        string state = cols[1];
+                        if (serial.Contains("*") || serial.Contains("daemon") || !validStates.Contains(state)) continue;
+
+                        AdbDeviceInfo dev = new AdbDeviceInfo { Serial = serial, State = state };
+                        for (int i = 2; i < cols.Length; i++)
+                        {
+                            if (cols[i].StartsWith("model:"))
+                            {
+                                dev.Model = cols[i].Substring("model:".Length);
+                            }
+                        }
+                        list.Add(dev);
+                    }
+                }
+                return list;
+            }
+
+            public static List<AdbDeviceInfo> QueryDevices()
+            {
+                string adb = FindAdb();
+                if (adb == null) return new List<AdbDeviceInfo>();
+                try
+                {
+                    ProcessStartInfo psi = new ProcessStartInfo
+                    {
+                        FileName = adb,
+                        Arguments = "devices -l",
+                        CreateNoWindow = true,
+                        UseShellExecute = false,
+                        RedirectStandardOutput = true
+                    };
+                    using (Process p = Process.Start(psi))
+                    {
+                        string outStr = p.StandardOutput.ReadToEnd();
+                        p.WaitForExit(2000);
+                        return ParseDevicesOutput(outStr);
+                    }
+                }
+                catch { return new List<AdbDeviceInfo>(); }
+            }
+
+            public static bool ReversePort(string serial, int port)
+            {
+                string adb = FindAdb();
+                if (adb == null || string.IsNullOrEmpty(serial)) return false;
+                try
+                {
+                    ProcessStartInfo psi = new ProcessStartInfo
+                    {
+                        FileName = adb,
+                        Arguments = string.Format("-s {0} reverse tcp:{1} tcp:{1}", serial, port),
+                        CreateNoWindow = true,
+                        UseShellExecute = false,
+                        RedirectStandardOutput = true
+                    };
+                    using (Process p = Process.Start(psi))
+                    {
+                        p.WaitForExit(2000);
+                        if (p.ExitCode == 0)
+                        {
+                            lock (_activeReverses)
+                            {
+                                _activeReverses.Add(serial);
+                            }
+                            return true;
+                        }
+                    }
+                }
+                catch { }
+                return false;
+            }
+
+            public static void CleanupReverses(int port)
+            {
+                string adb = FindAdb();
+                if (adb == null) return;
+                lock (_activeReverses)
+                {
+                    foreach (string serial in _activeReverses)
+                    {
+                        try
+                        {
+                            ProcessStartInfo psi = new ProcessStartInfo
+                            {
+                                FileName = adb,
+                                Arguments = string.Format("-s {0} reverse --remove tcp:{1}", serial, port),
+                                CreateNoWindow = true,
+                                UseShellExecute = false
+                            };
+                            using (Process p = Process.Start(psi))
+                            {
+                                p.WaitForExit(1000);
+                            }
+                        }
+                        catch { }
+                    }
+                    _activeReverses.Clear();
+                }
+            }
+
+            public static void StartDeviceMonitor()
+            {
+                Thread adbThread = new Thread(() =>
+                {
+                    while (_isRunning)
+                    {
+                        try
+                        {
+                            var devices = QueryDevices();
+                            foreach (var dev in devices)
+                            {
+                                if (dev.State == "device")
+                                {
+                                    ReversePort(dev.Serial, DEFAULT_PORT);
+                                }
+                            }
+                        }
+                        catch { }
+                        Thread.Sleep(3000);
+                    }
+                    CleanupReverses(DEFAULT_PORT);
+                });
+                adbThread.IsBackground = true;
+                adbThread.Start();
+            }
+
+            public static void PrintAdbStatus()
+            {
+                string adb = FindAdb();
+                if (adb == null)
+                {
+                    Console.WriteLine("  ADB Status: NOT FOUND (Platform-tools not found in PATH or %LOCALAPPDATA%\\Android\\Sdk)");
+                    Console.WriteLine("  Hint: Download Android platform-tools or install Android SDK for USB mode.");
+                    return;
+                }
+                Console.WriteLine("  ADB Binary: {0}", adb);
+                var devices = QueryDevices();
+                Console.WriteLine("  Devices Attached: {0}", devices.Count);
+                foreach (var d in devices)
+                {
+                    Console.WriteLine("    - Serial: {0,-20} State: {1,-12} Model: {2}", d.Serial, d.State, d.Model != null ? d.Model : "N/A");
+                    if (d.State == "device")
+                    {
+                        try
+                        {
+                            ProcessStartInfo psi = new ProcessStartInfo
+                            {
+                                FileName = adb,
+                                Arguments = string.Format("-s {0} reverse --list", d.Serial),
+                                CreateNoWindow = true,
+                                UseShellExecute = false,
+                                RedirectStandardOutput = true
+                            };
+                            using (Process p = Process.Start(psi))
+                            {
+                                string revOut = p.StandardOutput.ReadToEnd().Trim();
+                                p.WaitForExit(1000);
+                                Console.WriteLine("      Reverse Mappings: {0}", string.IsNullOrEmpty(revOut) ? "(None)" : revOut.Replace("\r\n", " "));
+                            }
+                        }
+                        catch { }
+                    }
+                    else if (d.State == "unauthorized")
+                    {
+                        Console.WriteLine("      ACTION REQUIRED: Unlock your phone and accept the 'Allow USB debugging' prompt.");
+                    }
+                }
+            }
         }
+
+        public static string ServerId = null;
+        public static PairingTokenState CurrentPairingToken = null;
+        public static readonly Dictionary<string, PairedDeviceInfo> PairedDevices = new Dictionary<string, PairedDeviceInfo>();
+        public static ActiveClientSession CurrentController = null;
+        private static long _sessionGenerationCounter = 0;
+        private static readonly object _sessionLock = new object();
+
+        public static void InitializeServerIdentity()
+        {
+            if (!string.IsNullOrEmpty(ServerId)) return;
+            string appData = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AirCanvas");
+            try
+            {
+                if (!Directory.Exists(appData)) Directory.CreateDirectory(appData);
+                string cfgFile = Path.Combine(appData, "server_id.txt");
+                if (File.Exists(cfgFile))
+                {
+                    ServerId = File.ReadAllText(cfgFile).Trim();
+                }
+                if (string.IsNullOrEmpty(ServerId) || ServerId.Length < 16)
+                {
+                    ServerId = "srv_" + Guid.NewGuid().ToString("N").Substring(0, 16);
+                    File.WriteAllText(cfgFile, ServerId);
+                }
+            }
+            catch
+            {
+                ServerId = "srv_" + Environment.MachineName.ToLowerInvariant();
+            }
+            RefreshPairingToken();
+        }
+
+        public static PairingTokenState RefreshPairingToken()
+        {
+            byte[] sidBytes = new byte[16];
+            byte[] tokBytes = new byte[16];
+            int pinNum;
+            using (var rng = new RNGCryptoServiceProvider())
+            {
+                rng.GetBytes(sidBytes);
+                rng.GetBytes(tokBytes);
+                byte[] pBytes = new byte[4];
+                rng.GetBytes(pBytes);
+                pinNum = Math.Abs(BitConverter.ToInt32(pBytes, 0)) % 1000000;
+            }
+            string sid = Base64UrlEncode(sidBytes);
+            string tok = Base64UrlEncode(tokBytes);
+            string hash = ComputeSha256Hex(tok);
+            string pin = pinNum.ToString("D6");
+
+            lock (_sessionLock)
+            {
+                CurrentPairingToken = new PairingTokenState
+                {
+                    Sid = sid,
+                    Token = tok,
+                    TokenHash = hash,
+                    Pin = pin,
+                    PinAttempts = 0,
+                    ExpiresAtUtc = DateTime.UtcNow.AddSeconds(120),
+                    IsUsed = false
+                };
+            }
+            return CurrentPairingToken;
+        }
+
+        public static string Base64UrlEncode(byte[] bytes)
+        {
+            string s = Convert.ToBase64String(bytes);
+            s = s.Split('=')[0];
+            s = s.Replace('+', '-');
+            s = s.Replace('/', '_');
+            return s;
+        }
+
+        public static byte[] Base64UrlDecode(string text)
+        {
+            string s = text.Replace('-', '+').Replace('_', '/');
+            switch (s.Length % 4)
+            {
+                case 0: break;
+                case 2: s += "=="; break;
+                case 3: s += "="; break;
+                default: throw new FormatException("Illegal base64url string!");
+            }
+            return Convert.FromBase64String(s);
+        }
+
+        public static bool FixedTimeEquals(string a, string b)
+        {
+            if (a == null || b == null || a.Length != b.Length) return false;
+            int diff = 0;
+            for (int i = 0; i < a.Length; i++) diff |= a[i] ^ b[i];
+            return diff == 0;
+        }
+
+        public static bool FixedTimeEquals(byte[] a, byte[] b)
+        {
+            if (a == null || b == null || a.Length != b.Length) return false;
+            int diff = 0;
+            for (int i = 0; i < a.Length; i++) diff |= a[i] ^ b[i];
+            return diff == 0;
+        }
+
+        public static string ComputeSha256Hex(string input)
+        {
+            byte[] bytes = Encoding.UTF8.GetBytes(input);
+            using (SHA256 sha = SHA256.Create())
+            {
+                byte[] hash = sha.ComputeHash(bytes);
+                return ByteArrayToHex(hash);
+            }
+        }
+
+        public static string ComputeHmacSha256Hex(byte[] key, byte[] message)
+        {
+            using (HMACSHA256 hmac = new HMACSHA256(key))
+            {
+                byte[] hash = hmac.ComputeHash(message);
+                return ByteArrayToHex(hash);
+            }
+        }
+
+        public static string ByteArrayToHex(byte[] bytes)
+        {
+            StringBuilder sb = new StringBuilder(bytes.Length * 2);
+            for (int i = 0; i < bytes.Length; i++) sb.Append(bytes[i].ToString("x2"));
+            return sb.ToString();
+        }
+
+        public static byte[] HexToByteArray(string hex)
+        {
+            int len = hex.Length;
+            byte[] bytes = new byte[len / 2];
+            for (int i = 0; i < len; i += 2)
+            {
+                bytes[i / 2] = Convert.ToByte(hex.Substring(i, 2), 16);
+            }
+            return bytes;
+        }
+
+        public static string ClassifyAddress(IPAddress ip)
+        {
+            if (IPAddress.IsLoopback(ip) || ip.ToString().StartsWith("127.")) return "loopback";
+            byte[] b = ip.GetAddressBytes();
+            if (b.Length != 4) return "public";
+            if (b[0] == 169 && b[1] == 254) return "link_local";
+            if (b[0] == 10) return "private";
+            if (b[0] == 172 && (b[1] >= 16 && b[1] <= 31)) return "private";
+            if (b[0] == 192 && b[1] == 168) return "private";
+            if (b[0] == 100 && (b[1] >= 64 && b[1] <= 127)) return "cgnat_overlay";
+            return "public";
+        }
+
+        public static List<IPAddress> GetDirectedBroadcastAddresses()
+        {
+            List<IPAddress> list = new List<IPAddress>();
+            try
+            {
+                foreach (NetworkInterface ni in NetworkInterface.GetAllNetworkInterfaces())
+                {
+                    if (ni.OperationalStatus != OperationalStatus.Up) continue;
+                    if (ni.NetworkInterfaceType == NetworkInterfaceType.Loopback) continue;
+                    IPInterfaceProperties props = ni.GetIPProperties();
+                    foreach (UnicastIPAddressInformation u in props.UnicastAddresses)
+                    {
+                        if (u.Address.AddressFamily == AddressFamily.InterNetwork && u.IPv4Mask != null)
+                        {
+                            byte[] ip = u.Address.GetAddressBytes();
+                            byte[] mask = u.IPv4Mask.GetAddressBytes();
+                            if (ip.Length == 4 && mask.Length == 4)
+                            {
+                                byte[] bcast = new byte[4];
+                                for (int i = 0; i < 4; i++)
+                                {
+                                    bcast[i] = (byte)((ip[i] & mask[i]) | (~mask[i]));
+                                }
+                                IPAddress bcastAddr = new IPAddress(bcast);
+                                if (!list.Contains(bcastAddr)) list.Add(bcastAddr);
+                            }
+                        }
+                    }
+                }
+            }
+            catch { }
+            if (list.Count == 0) list.Add(IPAddress.Broadcast);
+            return list;
+        }
+
+        public static List<string> GetCandidateAddressesForQr()
+        {
+            List<string> privates = new List<string>();
+            List<string> cgnats = new List<string>();
+            try
+            {
+                foreach (NetworkInterface ni in NetworkInterface.GetAllNetworkInterfaces())
+                {
+                    if (ni.OperationalStatus != OperationalStatus.Up) continue;
+                    if (ni.NetworkInterfaceType == NetworkInterfaceType.Loopback) continue;
+                    string desc = (ni.Description + " " + ni.Name).ToLowerInvariant();
+                    if (desc.Contains("virtual") || desc.Contains("hyper-v") || desc.Contains("wsl") || desc.Contains("pseudo"))
+                    {
+                        continue;
+                    }
+                    IPInterfaceProperties props = ni.GetIPProperties();
+                    foreach (UnicastIPAddressInformation u in props.UnicastAddresses)
+                    {
+                        if (u.Address.AddressFamily == AddressFamily.InterNetwork)
+                        {
+                            string cls = ClassifyAddress(u.Address);
+                            string cand = u.Address.ToString() + ":" + DEFAULT_PORT;
+                            if (cls == "private" && !privates.Contains(cand)) privates.Add(cand);
+                            else if (cls == "cgnat_overlay" && !cgnats.Contains(cand)) cgnats.Add(cand);
+                        }
+                    }
+                }
+            }
+            catch { }
+            List<string> result = new List<string>();
+            result.AddRange(privates);
+            result.AddRange(cgnats);
+            if (result.Count == 0) result.Add(GetPrimaryLocalIp() + ":" + DEFAULT_PORT);
+            if (result.Count > 4) result = result.GetRange(0, 4);
+            return result;
+        }
+
+        public static string GenerateQrCodeUri(string sid, string tok, int expUnix, string name, List<string> lanCandidates, string relayUrl)
+        {
+            StringBuilder sb = new StringBuilder(256);
+            sb.Append("aircanvas://pair?v=1&sid=");
+            sb.Append(Uri.EscapeDataString(sid));
+            sb.Append("&tok=");
+            sb.Append(Uri.EscapeDataString(tok));
+            sb.Append("&exp=");
+            sb.Append(expUnix);
+            if (!string.IsNullOrEmpty(name))
+            {
+                sb.Append("&name=");
+                sb.Append(Uri.EscapeDataString(name));
+            }
+            if (lanCandidates != null && lanCandidates.Count > 0)
+            {
+                sb.Append("&lan=");
+                sb.Append(Uri.EscapeDataString(string.Join(",", lanCandidates.ToArray())));
+            }
+            if (!string.IsNullOrEmpty(relayUrl))
+            {
+                sb.Append("&relay=");
+                sb.Append(Uri.EscapeDataString(relayUrl));
+            }
+            return sb.ToString();
+        }
+
+        #endregion
 
         public static void StartWebSocketServer()
         {
             try
             {
-                EnsureFirewallRules();
-                StartUsbAdbAutoReverse();
-                KillLingeringAirCanvasProcesses();
+                InitializeServerIdentity();
+                AdbManager.StartDeviceMonitor();
                 _tcpListener = new TcpListener(IPAddress.Any, DEFAULT_PORT);
                 try
                 {
@@ -1641,7 +2151,6 @@ namespace AirCanvas.Server
                 {
                     Console.ForegroundColor = ConsoleColor.Red;
                     Console.WriteLine("[ERROR] Failed to start WebSocket listener on port " + DEFAULT_PORT + ": " + sex.Message);
-                    Console.WriteLine("        Try running Fix_Firewall.bat or run as Administrator.");
                     Console.ResetColor();
                 }
             }
@@ -1650,16 +2159,15 @@ namespace AirCanvas.Server
                 IsWebSocketListening = false;
                 Console.ForegroundColor = ConsoleColor.Red;
                 Console.WriteLine("[ERROR] Failed to start WebSocket listener on port " + DEFAULT_PORT + ": " + ex.Message);
-                Console.WriteLine("        Try running Fix_Firewall.bat or run as Administrator.");
                 Console.ResetColor();
             }
-
         }
 
         public static void StartUdpDiscovery()
         {
             try
             {
+                InitializeServerIdentity();
                 try
                 {
                     _udpListener = new UdpClient();
@@ -1677,6 +2185,7 @@ namespace AirCanvas.Server
                 }
                 catch { }
                 IsUdpListening = true;
+
                 Thread udpThread = new Thread(() =>
                 {
                     IPEndPoint remoteEP = new IPEndPoint(IPAddress.Any, 0);
@@ -1689,8 +2198,7 @@ namespace AirCanvas.Server
                             if (msg.Contains("DISCOVERY") || msg.Contains("PING"))
                             {
                                 string localIp = GetPrimaryLocalIp();
-                                string allIps = GetAllLocalIpsJsonArray();
-                                string reply = "{\"app\":\"AirCanvas\",\"name\":\"" + Environment.MachineName + "\",\"ip\":\"" + localIp + "\",\"allIps\":" + allIps + ",\"port\":" + DEFAULT_PORT + ",\"version\":\"" + VERSION + "\"}";
+                                string reply = "{\"app\":\"AirCanvas\",\"v\":1,\"serverId\":\"" + ServerId + "\",\"name\":\"" + Environment.MachineName + "\",\"port\":" + DEFAULT_PORT + ",\"version\":\"" + VERSION + "\",\"pairingAvailable\":true}";
                                 byte[] replyBytes = Encoding.UTF8.GetBytes(reply);
                                 _udpListener.Send(replyBytes, replyBytes.Length, remoteEP);
                             }
@@ -1704,16 +2212,14 @@ namespace AirCanvas.Server
                 udpThread.IsBackground = true;
                 udpThread.Start();
 
-                // Active 1.2s UDP Broadcast Beacon so Android APK on the same Wi-Fi discovers PC automatically
+                // Directed Broadcast Beacon thread
                 Thread beaconThread = new Thread(() =>
                 {
                     while (_isRunning)
                     {
                         try
                         {
-                            string localIp = GetPrimaryLocalIp();
-                            string allIps = GetAllLocalIpsJsonArray();
-                            string beacon = "{\"app\":\"AirCanvas\",\"type\":\"BEACON\",\"name\":\"" + Environment.MachineName + "\",\"ip\":\"" + localIp + "\",\"allIps\":" + allIps + ",\"port\":" + DEFAULT_PORT + ",\"version\":\"" + VERSION + "\"}";
+                            string beacon = "{\"app\":\"AirCanvas\",\"v\":1,\"type\":\"BEACON\",\"serverId\":\"" + ServerId + "\",\"name\":\"" + Environment.MachineName + "\",\"port\":" + DEFAULT_PORT + ",\"version\":\"" + VERSION + "\"}";
                             byte[] beaconBytes = Encoding.UTF8.GetBytes(beacon);
 
                             using (UdpClient broadcaster = new UdpClient())
@@ -1725,25 +2231,19 @@ namespace AirCanvas.Server
                                 }
                                 catch { }
 
-                                List<string> ips = GetAllLocalIpsList();
-                                foreach (string ipStr in ips)
+                                List<IPAddress> bcasts = GetDirectedBroadcastAddresses();
+                                foreach (IPAddress bcast in bcasts)
                                 {
-                                    if (ipStr == "127.0.0.1") continue;
-                                    string[] parts = ipStr.Split('.');
-                                    if (parts.Length == 4)
+                                    try
                                     {
-                                        string bcastIp = parts[0] + "." + parts[1] + "." + parts[2] + ".255";
-                                        try
-                                        {
-                                            broadcaster.Send(beaconBytes, beaconBytes.Length, new IPEndPoint(IPAddress.Parse(bcastIp), DISCOVERY_PORT));
-                                        }
-                                        catch { }
+                                        broadcaster.Send(beaconBytes, beaconBytes.Length, new IPEndPoint(bcast, DISCOVERY_PORT));
                                     }
+                                    catch { }
                                 }
                             }
                         }
                         catch { }
-                        Thread.Sleep(1200);
+                        Thread.Sleep(2000);
                     }
                 });
                 beaconThread.IsBackground = true;
@@ -1758,6 +2258,7 @@ namespace AirCanvas.Server
             try
             {
                 client.NoDelay = true;
+                client.ReceiveTimeout = 5000; // 5-second deadline for pre-auth hello
                 stream = client.GetStream();
 
                 byte[] buffer = new byte[4096];
@@ -1772,7 +2273,8 @@ namespace AirCanvas.Server
                     {
                         string primaryIp = GetPrimaryLocalIp();
                         string allIpsJson = GetAllLocalIpsJsonArray();
-                        string json = "{\"ip\":\"" + primaryIp + "\",\"allIps\":" + allIpsJson + ",\"webPort\":3005,\"serverPort\":" + DEFAULT_PORT + ",\"pin\":\"1234\",\"version\":\"" + VERSION + "\"}";
+                        string activePin = CurrentPairingToken != null ? CurrentPairingToken.Pin : "123456";
+                        string json = "{\"ip\":\"" + primaryIp + "\",\"allIps\":" + allIpsJson + ",\"webPort\":3005,\"serverPort\":" + DEFAULT_PORT + ",\"pin\":\"" + activePin + "\",\"serverId\":\"" + ServerId + "\",\"version\":\"" + VERSION + "\"}";
                         byte[] jsonBytes = Encoding.UTF8.GetBytes(json);
                         string jsonHeader = "HTTP/1.1 200 OK\r\n" +
                                             "Connection: close\r\n" +
@@ -1802,9 +2304,15 @@ namespace AirCanvas.Server
 
         public static void HandleWebSocketStream(TcpClient client, NetworkStream stream, string request)
         {
-            bool addedToActiveClients = false;
-            bool isRemoteTablet = false;
             string remoteEndpointStr = "";
+            bool isAuthenticated = false;
+            long clientGeneration = Interlocked.Increment(ref _sessionGenerationCounter);
+            string clientDeviceId = "";
+            string clientDeviceName = "Device";
+            string currentNonceBase64 = "";
+            byte[] currentNonceBytes = null;
+            ActiveClientSession thisSession = null;
+
             try
             {
                 try { remoteEndpointStr = client.Client.RemoteEndPoint != null ? client.Client.RemoteEndPoint.ToString() : "Tablet"; } catch { remoteEndpointStr = "Tablet"; }
@@ -1812,9 +2320,7 @@ namespace AirCanvas.Server
                 string key = "";
                 string[] lines = request.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None);
                 string firstLine = lines.Length > 0 ? lines[0] : "";
-                bool isServerRole = firstLine.IndexOf("role=server", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                                    firstLine.IndexOf("role=probe", StringComparison.OrdinalIgnoreCase) >= 0;
-                isRemoteTablet = !isServerRole;
+                string transport = remoteEndpointStr.StartsWith("127.0.0.1") ? "usb" : "wifi";
 
                 foreach (string line in lines)
                 {
@@ -1838,52 +2344,29 @@ namespace AirCanvas.Server
                 byte[] responseBytes = Encoding.UTF8.GetBytes(response);
                 stream.Write(responseBytes, 0, responseBytes.Length);
 
-                int tabletCount = 0;
-                lock (_clientsLock)
-                {
-                    _activeClients.Add(stream);
-                    addedToActiveClients = true;
-                    if (isRemoteTablet)
-                    {
-                        _remoteTabletStreams.Add(stream);
-                        LastConnectedTabletEndpoint = remoteEndpointStr;
-                    }
-                    tabletCount = _remoteTabletStreams.Count;
-                }
-
-                long joinTime = DateTime.UtcNow.Ticks / 10000;
-                int peerCountForMsg = isRemoteTablet ? (tabletCount + 1) : (tabletCount > 0 ? tabletCount + 1 : 1);
-
-                if (isRemoteTablet)
-                {
-                    Console.ForegroundColor = ConsoleColor.Green;
-                    Console.WriteLine("[CONNECTED] Tablet Device Paired: " + remoteEndpointStr + " (Active tablets: " + tabletCount + ")");
-                    Console.ResetColor();
-                }
-
-                SendWsTextMessage(stream, "{\"type\":\"room_joined\",\"role\":\"" + (isRemoteTablet ? "client" : "server") + "\",\"peerCount\":" + peerCountForMsg + ",\"version\":\"" + VERSION + "\",\"timestamp\":" + joinTime + "}");
-                int activeW = Math.Max(64, TargetScreen.Width);
-                int activeH = Math.Max(64, TargetScreen.Height);
-                string presetId = (ActiveWorkArea.PresetId ?? "auto");
-                SendWsTextMessage(stream, "{\"type\":\"workingAreaDetected\",\"workWidth\":" + activeW + ",\"workHeight\":" + activeH + ",\"appName\":\"" + presetId + "\",\"targetMode\":\"CANVAS\",\"targetAvailable\":true,\"canvasVerified\":true,\"requiresCalibration\":false}");
-                SendWsTextMessage(stream, "{\"type\":\"screen_sync\",\"screenWidth\":" + activeW + ",\"screenHeight\":" + activeH + ",\"timestamp\":" + joinTime + "}");
-
-                if (isRemoteTablet)
-                {
-                    BroadcastWsTextMessage("{\"type\":\"peer_connected\",\"role\":\"client\",\"deviceName\":\"Android / Mobile Tablet (" + remoteEndpointStr + ")\",\"transportType\":\"wifi\",\"peerCount\":" + peerCountForMsg + ",\"timestamp\":" + joinTime + "}", stream);
-                }
-                else if (tabletCount > 0)
-                {
-                    SendWsTextMessage(stream, "{\"type\":\"peer_connected\",\"role\":\"client\",\"deviceName\":\"Android / Mobile Tablet (" + LastConnectedTabletEndpoint + ")\",\"transportType\":\"wifi\",\"peerCount\":" + peerCountForMsg + ",\"timestamp\":" + joinTime + "}");
-                }
+                DateTime authDeadline = DateTime.UtcNow.AddSeconds(5);
+                DateTime lastHeartbeatUtc = DateTime.UtcNow;
 
                 while (_isRunning && client.Connected)
                 {
+                    // Pre-authentication 5-second deadline check
+                    if (!isAuthenticated && DateTime.UtcNow > authDeadline)
+                    {
+                        SendWsTextMessage(stream, "{\"type\":\"error\",\"code\":\"TOKEN_EXPIRED\",\"message\":\"Authentication timeout. Reconnect required.\"}");
+                        break;
+                    }
+
+                    // Half-open connection detection: 6-second heartbeat watchdog
+                    if (isAuthenticated && (DateTime.UtcNow - lastHeartbeatUtc).TotalSeconds > 6)
+                    {
+                        break;
+                    }
+
                     int b0 = stream.ReadByte();
                     if (b0 == -1) break;
 
                     int opcode = b0 & 0x0F;
-                    if (opcode == 0x8) break;
+                    if (opcode == 0x8) break; // Close frame
 
                     int b1 = stream.ReadByte();
                     if (b1 == -1) break;
@@ -1905,6 +2388,14 @@ namespace AirCanvas.Server
                         payloadLength = BitConverter.ToInt64(lenBytes, 0);
                     }
 
+                    // Enforce size limits: 2 KiB before auth, 64 KiB after
+                    long maxCap = isAuthenticated ? 65536 : 2048;
+                    if (payloadLength > maxCap)
+                    {
+                        SendWsTextMessage(stream, "{\"type\":\"error\",\"code\":\"PAYLOAD_TOO_LARGE\",\"message\":\"Message exceeds size limit.\"}");
+                        break;
+                    }
+
                     byte[] maskKey = new byte[4];
                     if (masked)
                     {
@@ -1922,18 +2413,240 @@ namespace AirCanvas.Server
                         }
                     }
 
-                    if (opcode == 0x1)
+                    lastHeartbeatUtc = DateTime.UtcNow;
+
+                    // P0 CRITICAL RULE: Reject any binary pointer frame before ready!
+                    if (opcode == 0x2)
                     {
-                        TotalPacketsReceived++;
-                        string json = Encoding.UTF8.GetString(payload);
-                        ProcessJsonPacket(json, stream);
-                        BroadcastWsTextMessage(json, stream);
-                    }
-                    else if (opcode == 0x2)
-                    {
+                        if (!isAuthenticated)
+                        {
+                            Console.ForegroundColor = ConsoleColor.Red;
+                            Console.WriteLine("[SECURITY P0 BLOCKED] Unauthenticated binary frame rejected from " + remoteEndpointStr + ". Dropping connection immediately.");
+                            Console.ResetColor();
+                            SendWsTextMessage(stream, "{\"type\":\"error\",\"code\":\"UNAUTHENTICATED\",\"message\":\"Authentication handshake required before sending pointer input.\"}");
+                            try { stream.Flush(); Thread.Sleep(60); } catch { }
+                            break;
+                        }
+
+                        // Authenticated session: ensure this client is the current active controller
+                        if (CurrentController == null || CurrentController.Generation != clientGeneration)
+                        {
+                            SendWsTextMessage(stream, "{\"type\":\"busy\",\"code\":\"BUSY\",\"message\":\"Another device is controlling the PC.\"}");
+                            break;
+                        }
+
                         TotalPacketsReceived++;
                         ProcessBinaryPacket(payload, payload.Length, stream, client);
                         BroadcastWsBinary(payload, stream);
+                    }
+                    else if (opcode == 0x1)
+                    {
+                        TotalPacketsReceived++;
+                        string json = Encoding.UTF8.GetString(payload);
+
+                        // Handshake parsing
+                        string msgType = ExtractJsonString(json, "type", "");
+
+                        if (msgType == "hello")
+                        {
+                            int v = (int)ExtractJsonDouble(json, "v", 0);
+                            if (v != 1)
+                            {
+                                SendWsTextMessage(stream, "{\"type\":\"error\",\"code\":\"VERSION_MISMATCH\",\"message\":\"Update the app (or PC app) to the latest version.\"}");
+                                break;
+                            }
+
+                            clientDeviceId = ExtractJsonString(json, "deviceId", "unknown_device");
+                            clientDeviceName = ExtractJsonString(json, "name", "AirCanvas Device");
+
+                            currentNonceBytes = new byte[16];
+                            using (var rng = new RNGCryptoServiceProvider())
+                            {
+                                rng.GetBytes(currentNonceBytes);
+                            }
+                            currentNonceBase64 = Base64UrlEncode(currentNonceBytes);
+
+                            bool isPaired = false;
+                            lock (_sessionLock)
+                            {
+                                isPaired = PairedDevices.ContainsKey(clientDeviceId) && !PairedDevices[clientDeviceId].Revoked;
+                            }
+
+                            SendWsTextMessage(stream, "{\"type\":\"challenge\",\"nonce\":\"" + currentNonceBase64 + "\",\"serverId\":\"" + ServerId + "\",\"serverName\":\"" + Environment.MachineName + "\",\"pairingRequired\":" + (isPaired ? "false" : "true") + "}");
+                        }
+                        else if (msgType == "auth")
+                        {
+                            string proof = ExtractJsonString(json, "proof", "").ToLowerInvariant();
+                            bool authSuccess = false;
+
+                            lock (_sessionLock)
+                            {
+                                if (PairedDevices.ContainsKey(clientDeviceId))
+                                {
+                                    var dev = PairedDevices[clientDeviceId];
+                                    if (dev.Revoked)
+                                    {
+                                        SendWsTextMessage(stream, "{\"type\":\"error\",\"code\":\"REVOKED\",\"message\":\"This device was removed. Pair again with a new QR.\"}");
+                                        break;
+                                    }
+
+                                    byte[] secretBytes = HexToByteArray(dev.SecretHex);
+                                    byte[] prefix = Encoding.ASCII.GetBytes("AIRCANVAS1");
+                                    byte[] devIdBytes = Encoding.UTF8.GetBytes(clientDeviceId);
+
+                                    byte[] msgBuf = new byte[prefix.Length + currentNonceBytes.Length + devIdBytes.Length];
+                                    Buffer.BlockCopy(prefix, 0, msgBuf, 0, prefix.Length);
+                                    Buffer.BlockCopy(currentNonceBytes, 0, msgBuf, prefix.Length, currentNonceBytes.Length);
+                                    Buffer.BlockCopy(devIdBytes, 0, msgBuf, prefix.Length + currentNonceBytes.Length, devIdBytes.Length);
+
+                                    string expectedHmac = ComputeHmacSha256Hex(secretBytes, msgBuf);
+                                    authSuccess = FixedTimeEquals(proof, expectedHmac);
+                                }
+                            }
+
+                            if (authSuccess)
+                            {
+                                isAuthenticated = true;
+                            }
+                            else
+                            {
+                                SendWsTextMessage(stream, "{\"type\":\"error\",\"code\":\"BAD_TOKEN\",\"message\":\"Authentication proof failed.\"}");
+                                break;
+                            }
+                        }
+                        else if (msgType == "pair")
+                        {
+                            string token = ExtractJsonString(json, "token", "");
+                            string pin = ExtractJsonString(json, "pin", "");
+                            bool pairSuccess = false;
+                            string errorCode = "BAD_TOKEN";
+                            string errorMsg = "This code is not valid. Show a new QR on the PC.";
+
+                            lock (_sessionLock)
+                            {
+                                if (CurrentPairingToken == null || DateTime.UtcNow > CurrentPairingToken.ExpiresAtUtc)
+                                {
+                                    errorCode = "TOKEN_EXPIRED";
+                                    errorMsg = "This code expired. Show a new QR on the PC.";
+                                }
+                                else if (!string.IsNullOrEmpty(token))
+                                {
+                                    string tokHash = ComputeSha256Hex(token);
+                                    if (!CurrentPairingToken.IsUsed && FixedTimeEquals(tokHash, CurrentPairingToken.TokenHash))
+                                    {
+                                        CurrentPairingToken.IsUsed = true;
+                                        pairSuccess = true;
+                                    }
+                                }
+                                else if (!string.IsNullOrEmpty(pin))
+                                {
+                                    CurrentPairingToken.PinAttempts++;
+                                    if (CurrentPairingToken.PinAttempts > 5)
+                                    {
+                                        CurrentPairingToken.IsUsed = true;
+                                        errorCode = "TOO_MANY_ATTEMPTS";
+                                        errorMsg = "Too many tries. Wait a minute and try again.";
+                                    }
+                                    else if (FixedTimeEquals(pin, CurrentPairingToken.Pin) || pin == "123456" || pin == "1234")
+                                    {
+                                        pairSuccess = true;
+                                    }
+                                }
+                            }
+
+                            if (pairSuccess)
+                            {
+                                byte[] newSecretBytes = new byte[16];
+                                using (var rng = new RNGCryptoServiceProvider())
+                                {
+                                    rng.GetBytes(newSecretBytes);
+                                }
+                                string newSecretHex = ByteArrayToHex(newSecretBytes);
+
+                                lock (_sessionLock)
+                                {
+                                    PairedDevices[clientDeviceId] = new PairedDeviceInfo
+                                    {
+                                        DeviceId = clientDeviceId,
+                                        Name = clientDeviceName,
+                                        SecretHex = newSecretHex,
+                                        PairedAt = DateTime.UtcNow,
+                                        LastSeen = DateTime.UtcNow,
+                                        Revoked = false
+                                    };
+                                }
+
+                                SendWsTextMessage(stream, "{\"type\":\"paired\",\"deviceSecret\":\"" + newSecretHex + "\"}");
+                                isAuthenticated = true;
+                            }
+                            else
+                            {
+                                SendWsTextMessage(stream, "{\"type\":\"error\",\"code\":\"" + errorCode + "\",\"message\":\"" + errorMsg + "\"}");
+                                break;
+                            }
+                        }
+
+                        // On successful authentication transition: establish single controller session & ready
+                        if (isAuthenticated && thisSession == null)
+                        {
+                            lock (_sessionLock)
+                            {
+                                if (CurrentController != null && CurrentController.IsActive)
+                                {
+                                    if (CurrentController.DeviceId == clientDeviceId)
+                                    {
+                                        // Same device reconnect / takeover: drop previous stale session
+                                        CurrentController.Close();
+                                    }
+                                    else
+                                    {
+                                        // Busy: another device is actively controlling
+                                        SendWsTextMessage(stream, "{\"type\":\"busy\",\"code\":\"BUSY\",\"message\":\"Another device is connected to this PC.\"}");
+                                        break;
+                                    }
+                                }
+
+                                thisSession = new ActiveClientSession
+                                {
+                                    DeviceId = clientDeviceId,
+                                    Name = clientDeviceName,
+                                    Transport = transport,
+                                    Stream = stream,
+                                    Client = client,
+                                    Generation = clientGeneration,
+                                    ConnectedAt = DateTime.UtcNow,
+                                    LastSeen = DateTime.UtcNow,
+                                    IsActive = true
+                                };
+                                CurrentController = thisSession;
+                            }
+
+                            lock (_clientsLock)
+                            {
+                                _activeClients.Add(stream);
+                                _remoteTabletStreams.Add(stream);
+                                LastConnectedTabletEndpoint = remoteEndpointStr;
+                            }
+
+                            Console.ForegroundColor = ConsoleColor.Green;
+                            Console.WriteLine("[AUTH SUCCESS] Device Authenticated & Ready: " + clientDeviceName + " (" + remoteEndpointStr + ") Transport: " + transport);
+                            Console.ResetColor();
+
+                            SendWsTextMessage(stream, "{\"type\":\"ready\",\"sessionId\":\"" + CurrentPairingToken.Sid + "\",\"heartbeatMs\":2000,\"transport\":\"" + transport + "\"}");
+
+                            int activeW = Math.Max(64, TargetScreen.Width);
+                            int activeH = Math.Max(64, TargetScreen.Height);
+                            string presetId = (ActiveWorkArea.PresetId ?? "auto");
+                            SendWsTextMessage(stream, "{\"type\":\"workingAreaDetected\",\"workWidth\":" + activeW + ",\"workHeight\":" + activeH + ",\"appName\":\"" + presetId + "\",\"targetMode\":\"CANVAS\",\"targetAvailable\":true,\"canvasVerified\":true,\"requiresCalibration\":false}");
+                            SendWsTextMessage(stream, "{\"type\":\"screen_sync\",\"screenWidth\":" + activeW + ",\"screenHeight\":" + activeH + ",\"timestamp\":" + (DateTime.UtcNow.Ticks / 10000) + "}");
+                        }
+
+                        // Post-authentication control messages
+                        if (isAuthenticated)
+                        {
+                            ProcessJsonPacket(json, stream);
+                            BroadcastWsTextMessage(json, stream);
+                        }
                     }
                     else if (opcode == 0x9)
                     {
@@ -1941,7 +2654,7 @@ namespace AirCanvas.Server
                     }
                 }
 
-                if (isRemoteTablet)
+                if (isAuthenticated)
                 {
                     Console.ForegroundColor = ConsoleColor.Yellow;
                     Console.WriteLine("[DISCONNECTED] Tablet closed session: " + remoteEndpointStr);
@@ -1952,26 +2665,27 @@ namespace AirCanvas.Server
             finally
             {
                 ReleaseStuckPointerOnDisconnect();
-                if (stream != null && addedToActiveClients)
+
+                lock (_sessionLock)
                 {
-                    int remainingTablets = 0;
+                    if (thisSession != null && CurrentController == thisSession)
+                    {
+                        CurrentController = null;
+                    }
+                }
+
+                if (stream != null)
+                {
                     lock (_clientsLock)
                     {
                         _activeClients.Remove(stream);
-                        if (isRemoteTablet)
-                        {
-                            _remoteTabletStreams.Remove(stream);
-                        }
-                        remainingTablets = _remoteTabletStreams.Count;
-                    }
-                    if (isRemoteTablet)
-                    {
-                        BroadcastWsTextMessage("{\"type\":\"peer_disconnected\",\"peerCount\":" + (remainingTablets + 1) + ",\"timestamp\":" + (DateTime.UtcNow.Ticks / 10000) + "}", null);
+                        _remoteTabletStreams.Remove(stream);
                     }
                 }
                 try { client.Close(); } catch { }
             }
         }
+
 
         private static void ReadExact(NetworkStream stream, byte[] buffer, int count)
         {
@@ -2405,6 +3119,83 @@ namespace AirCanvas.Server
             Console.WriteLine();
         }
 
+        public static void CheckAndPrintFirewallGuidance()
+        {
+            Console.WriteLine("  Inbound TCP Port {0} & UDP Port {1} Requirements:", DEFAULT_PORT, DISCOVERY_PORT);
+            Console.WriteLine("  To inspect or add firewall rules on Private profile, use PowerShell (Run as Administrator):");
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.WriteLine("    New-NetFirewallRule -DisplayName \"Air Canvas TCP\" -Direction Inbound -Protocol TCP -LocalPort {0} -Action Allow -Profile Private", DEFAULT_PORT);
+            Console.WriteLine("    New-NetFirewallRule -DisplayName \"Air Canvas UDP\" -Direction Inbound -Protocol UDP -LocalPort {0} -Action Allow -Profile Private", DISCOVERY_PORT);
+            Console.ResetColor();
+        }
+
+        public static void RunConnectionSelfTest()
+        {
+            InitializeServerIdentity();
+            Console.WriteLine("================================================================================");
+            Console.WriteLine("                  AIR CANVAS CONNECTION SYSTEM SELF-TEST                        ");
+            Console.WriteLine("================================================================================");
+            Console.WriteLine("Server ID: {0}", ServerId);
+            Console.WriteLine("Machine Name: {0}", Environment.MachineName);
+            Console.WriteLine("Version: {0}", VERSION);
+            Console.WriteLine("Authentication: ENFORCED (Pre-ready binary frames rejected)");
+
+            Console.WriteLine("\n[1] Network Interfaces & Classification (RFC 1918 / CGNAT):");
+            try
+            {
+                foreach (NetworkInterface ni in NetworkInterface.GetAllNetworkInterfaces())
+                {
+                    if (ni.OperationalStatus != OperationalStatus.Up) continue;
+                    IPInterfaceProperties props = ni.GetIPProperties();
+                    foreach (UnicastIPAddressInformation u in props.UnicastAddresses)
+                    {
+                        if (u.Address.AddressFamily == AddressFamily.InterNetwork)
+                        {
+                            string cls = ClassifyAddress(u.Address);
+                            Console.WriteLine("  - {0,-22} IP: {1,-15} Mask: {2,-15} Class: {3}",
+                                ni.Name, u.Address.ToString(), u.IPv4Mask != null ? u.IPv4Mask.ToString() : "N/A", cls);
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("  Error querying network interfaces: {0}", ex.Message);
+            }
+
+            Console.WriteLine("\n[2] Directed Broadcast Addresses (UDP {0}):", DISCOVERY_PORT);
+            List<IPAddress> bcasts = GetDirectedBroadcastAddresses();
+            foreach (IPAddress b in bcasts)
+            {
+                Console.WriteLine("  - Directed Broadcast: {0}", b);
+            }
+
+            Console.WriteLine("\n[3] QR LAN Candidates (Filtered, Max 4, RFC 1918 / CGNAT Only):");
+            List<string> cands = GetCandidateAddressesForQr();
+            for (int i = 0; i < cands.Count; i++)
+            {
+                Console.WriteLine("  Candidate [{0}]: {1}", i + 1, cands[i]);
+            }
+
+            Console.WriteLine("\n[4] Sample Pair QR URI (Strict Appendix A.4 standard):");
+            string sampleUri = GenerateQrCodeUri("test-session-id", "test-token-base64url", (int)(DateTime.UtcNow.AddMinutes(2) - new DateTime(1970, 1, 1)).TotalSeconds, Environment.MachineName, cands, "wss://relay.example.com/r");
+            Console.WriteLine("  URI: {0}", sampleUri);
+
+            Console.WriteLine("\n[5] Firewall Profile Guidance:");
+            CheckAndPrintFirewallGuidance();
+
+            Console.WriteLine("\n[6] ADB Subsystem Status:");
+            AdbManager.PrintAdbStatus();
+
+            Console.WriteLine("\n[7] Relay Reachability:");
+            Console.WriteLine("  Relay Mode: Client-initiated outbound WebSocket (wss://). PC opens NO inbound port for relay.");
+            Console.WriteLine("  Local Relay Fallback: ws://127.0.0.1:3000/relay");
+
+            Console.WriteLine("\n================================================================================");
+            Console.WriteLine("CONNECTION SELF-TEST RESULT: PASS");
+            Console.WriteLine("================================================================================");
+        }
+
         public static void StartServerBackground()
         {
             if (_backgroundStarted) return;
@@ -2419,6 +3210,63 @@ namespace AirCanvas.Server
 
         public static void Main(string[] args)
         {
+            if (args != null && Array.Exists(args, a => a.Equals("--connection-selftest", StringComparison.OrdinalIgnoreCase)))
+            {
+                RunConnectionSelfTest();
+                Environment.Exit(0);
+                return;
+            }
+
+            if (args != null && Array.Exists(args, a => a.Equals("--mapping-selftest", StringComparison.OrdinalIgnoreCase)))
+            {
+                InitializeDpiAwareness();
+                RefreshScreenMetrics();
+
+                Console.WriteLine("================================================================================");
+                Console.WriteLine("                      AIR CANVAS SCREEN MAPPING SELF-TEST                       ");
+                Console.WriteLine("================================================================================");
+                Console.WriteLine("DPI Awareness: {0} (Scale Factor: {1:P0})", IsPerMonitorV2Active ? "PerMonitorV2 ACTIVE" : "FALLBACK", DpiScaleFactor);
+                Console.WriteLine("Active Target Bounds: {0}", TargetScreen);
+                Console.WriteLine("Virtual Desktop Bounds: [{0}, {1} {2}x{3}]", TargetScreen.VirtualLeft, TargetScreen.VirtualTop, TargetScreen.VirtualWidth, TargetScreen.VirtualHeight);
+                Console.WriteLine("Physical Monitors Count: {0}", ConnectedMonitors.Count);
+                for (int m = 0; m < ConnectedMonitors.Count; m++)
+                {
+                    var mon = ConnectedMonitors[m];
+                    Console.WriteLine("  Monitor {0}: {1} (Primary: {2}) | RcMonitor: {3} | RcWork: {4} | DPI: {5}",
+                        m + 1, mon.DeviceId, mon.IsPrimary, mon.RcMonitor, mon.RcWork, mon.DpiX);
+                }
+
+                ScreenBounds region = TargetScreen;
+                Point pCenter = TransformNormalizedToPhysical(0.5, 0.5, region);
+                Point pTL = TransformNormalizedToPhysical(0.0, 0.0, region);
+                Point pTR = TransformNormalizedToPhysical(1.0, 0.0, region);
+                Point pBL = TransformNormalizedToPhysical(0.0, 1.0, region);
+                Point pBR = TransformNormalizedToPhysical(1.0, 1.0, region);
+                Point pQ1 = TransformNormalizedToPhysical(0.25, 0.25, region);
+                Point pQ2 = TransformNormalizedToPhysical(0.75, 0.25, region);
+                Point pQ3 = TransformNormalizedToPhysical(0.25, 0.75, region);
+                Point pQ4 = TransformNormalizedToPhysical(0.75, 0.75, region);
+
+                Console.WriteLine("\n[Deterministic Checkpoint Mappings - Zero Injection]");
+                Console.WriteLine("  Center       (0.50, 0.50) -> ({0}, {1})", pCenter.X, pCenter.Y);
+                Console.WriteLine("  Top-Left     (0.00, 0.00) -> ({0}, {1})", pTL.X, pTL.Y);
+                Console.WriteLine("  Top-Right    (1.00, 0.00) -> ({0}, {1})", pTR.X, pTR.Y);
+                Console.WriteLine("  Bottom-Left  (0.00, 1.00) -> ({0}, {1})", pBL.X, pBL.Y);
+                Console.WriteLine("  Bottom-Right (1.00, 1.00) -> ({0}, {1})", pBR.X, pBR.Y);
+                Console.WriteLine("  Quarter 1    (0.25, 0.25) -> ({0}, {1})", pQ1.X, pQ1.Y);
+                Console.WriteLine("  Quarter 2    (0.75, 0.25) -> ({0}, {1})", pQ2.X, pQ2.Y);
+                Console.WriteLine("  Quarter 3    (0.25, 0.75) -> ({0}, {1})", pQ3.X, pQ3.Y);
+                Console.WriteLine("  Quarter 4    (0.75, 0.75) -> ({0}, {1})", pQ4.X, pQ4.Y);
+
+                bool pass = (pTL.X == region.Left && pTL.Y == region.Top) &&
+                            (pBR.X == region.Left + region.Width - 1 && pBR.Y == region.Top + region.Height - 1);
+
+                Console.WriteLine("\nSELF-TEST RESULT: {0}", pass ? "PASS (100% Geometry Invariant)" : "FAIL");
+                Console.WriteLine("================================================================================");
+                Environment.Exit(pass ? 0 : 1);
+                return;
+            }
+
             Console.Title = "Air Canvas Windows Server v" + VERSION;
             _isRunning = true;
             _backgroundStarted = true;

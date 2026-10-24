@@ -2,6 +2,30 @@
 
 All notable changes to **Air Canvas** are documented in this file.
 
+## [2.0.4] — 2026-10-24
+
+### Added
+- **Master Coordinate Mapping Pipeline (Part B / Appendix A Standards)**:
+  - Strict aspect-ratio preservation (`fitActiveRect` / `ComputeAspectPreservingTargetRect`) preventing circle-to-oval distortion on mismatched PC/tablet ratios.
+  - Per-Monitor V2 DPI awareness with physical multi-monitor enumeration (`EnumDisplayMonitors`) and virtual desktop coordinate space mapping (supporting secondary and negative monitor coordinates).
+  - Exact pixel boundaries via `DwmGetWindowAttribute` with `DWMWA_EXTENDED_FRAME_BOUNDS` for foreground window targeting.
+  - Half-way rounding trap elimination: Replaced banker's rounding with `MidpointRounding.AwayFromZero` across C#, Dart, and JavaScript engines.
+  - Active-stroke boundary latching (`StrokeRegionGate` and `_latchedStrokePadRect`) ensuring 0 px mid-stroke jumps during window resize or display changes.
+  - Deterministic startup self-tests: `--mapping-selftest` and `--connection-selftest` validating geometry and transport security without injecting input.
+- **Connection Hardening & Transport Contracts**:
+  - P0 Handshake Gate: Enforced strict pre-ready binary pointer rejection (`UNAUTHENTICATED`) on WebSocket and relay streams.
+  - Standardized `aircanvas://pair` strict QR URI format (Appendix A.4) with 128-bit single-use pairing tokens (120s TTL) and PIN fallback.
+  - Reconnection with constant-time HMAC-SHA256 session proof verification across C#, Dart, and Node.js.
+  - Single active controller session invariant with `busy` policy rejection for competing devices.
+  - Automated ADB reverse tunnel manager detecting platform-tools and setting up `tcp:9090` USB cables automatically.
+  - Directed UDP broadcast beaconing across all active physical network interfaces on port 9091.
+
+### Verified
+- 41/41 Appendix A contract vectors passing in both Dart and Node.js.
+- 117/117 connection contract tests passing in Node.js and 108/108 in Dart.
+- 2,039 deterministic assertions passing across 16 fuzz, calibration, and mapping suites.
+- 11/11 native socket integration tests passing against live `AirCanvasServer.exe`.
+
 ---
 
 ## [2.0.0] — 2026-10-17

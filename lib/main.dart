@@ -6,6 +6,7 @@ import 'dart:typed_data';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'services/connection_contracts.dart';
 
 
 void main() {
@@ -20,7 +21,7 @@ class AirCanvasApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Air Canvas v2.0.3',
+      title: 'Air Canvas v2.0.4',
       debugShowCheckedModeBanner: false,
       theme: ThemeData.dark().copyWith(
         scaffoldBackgroundColor: const Color(0xFF0A0A14),
@@ -459,11 +460,23 @@ class NetworkConnectionManager extends ChangeNotifier {
     } catch (_) {}
   }
 
-  Future<bool> connect(String ip, int port, {String? pin}) async {
+  int _sessionGeneration = 0;
+  final String _deviceId = 'device_${DateTime.now().millisecondsSinceEpoch}';
+  final Map<String, String> _storedSecrets = {};
+  String? _activePairToken;
+  String? _currentServerId;
+  int _reconnectAttempts = 0;
+  Timer? _reconnectTimer;
+  bool _userExplicitDisconnect = false;
+
+  Future<bool> connect(String ip, int port, {String? pin, String? qrToken}) async {
+    _userExplicitDisconnect = false;
+    _reconnectTimer?.cancel();
+    final int generation = ++_sessionGeneration;
+
     String cleanIp = ip.trim();
     int targetPort = port;
 
-    // Strip any accidental protocol prefix or path
     cleanIp = cleanIp.replaceFirst(RegExp(r'^(wss?|https?)://', caseSensitive: false), '');
     cleanIp = cleanIp.split('/').first.trim();
     if (cleanIp.contains(':')) {
@@ -488,9 +501,11 @@ class NetworkConnectionManager extends ChangeNotifier {
 
     final cleanPin = (pin ?? pairingPin).trim().isEmpty ? '1234' : (pin ?? pairingPin).trim();
     pairingPin = cleanPin;
+    _activePairToken = qrToken;
 
-    await disconnect();
+    await _internalDisconnect(userInitiated: false);
     isConnecting = true;
+    isConnected = false;
     lastError = '';
     statusMessage = 'Connecting to PC ($cleanIp:$targetPort)...';
     notifyListeners();
@@ -536,6 +551,7 @@ class NetworkConnectionManager extends ChangeNotifier {
     String selectedTransport = transportTag;
 
     for (final cand in candidates) {
+      if (generation != _sessionGeneration) return false;
       try {
         statusMessage = 'Connecting to ${cand['label']}...';
         notifyListeners();
@@ -549,135 +565,282 @@ class NetworkConnectionManager extends ChangeNotifier {
       }
     }
 
-    if (sock == null) {
-      isConnected = false;
-      isConnecting = false;
-      lastError = 'Could not reach PC at $cleanIp:$targetPort. Make sure AirCanvas.exe is open on PC and both devices are on the same Wi-Fi (or click "Unblock Firewall & USB" on PC).';
-      statusMessage = 'Connection failed ($cleanIp:$targetPort)';
-      notifyListeners();
+    if (sock == null || generation != _sessionGeneration) {
+      if (generation == _sessionGeneration) {
+        isConnected = false;
+        isConnecting = false;
+        lastError = 'Could not reach PC at $cleanIp:$targetPort. Make sure AirCanvas.exe is open on PC and both devices are on the same Wi-Fi (or click "Unblock Firewall & USB" on PC).';
+        statusMessage = 'Connection failed ($cleanIp:$targetPort)';
+        notifyListeners();
+      }
       return false;
     }
 
     try {
       _socket = sock;
       _socket!.pingInterval = const Duration(seconds: 2);
-
-      isConnected = true;
-      isConnecting = false;
-      activeTransport = selectedTransport;
       connectedIp = cleanIp;
       connectedPort = targetPort;
-      detectedSubnetHint = cleanIp;
-      statusMessage = 'Connected ($connectedLabel) • 1:1 ${selectedPreset.shortLabel}';
+      activeTransport = selectedTransport;
+      statusMessage = 'Authenticating with PC ($connectedLabel)...';
       notifyListeners();
 
-      // Send formal connect_request handshake for Web Studio & PC Desktop + sync PC Software Working Area preset
-      try {
-        _socket!.add(jsonEncode({
-          'type': 'connect_request',
-          'senderId': 'android_apk_${DateTime.now().millisecondsSinceEpoch}',
-          'senderMode': 'client',
-          'pin': cleanPin,
-          'transportType': selectedTransport == 'usb' ? 'usb' : 'wifi',
-          'deviceInfo': {
-            'deviceName': 'Android Tablet / Phone (APK)',
-            'deviceModel': 'Android Stylus Digitizer',
-            'platform': 'android',
-            'screenWidth': 1920,
-            'screenHeight': 1080,
-            'hasStylusSupport': true,
-            'maxPressure': 1.0,
-          },
-          'timestamp': DateTime.now().millisecondsSinceEpoch,
-        }));
-      } catch (_) {}
-      syncWorkingAreaToPC();
-
-      _socket!.listen(
-        (dynamic message) {
-          if (message is String) {
-            try {
-              final data = jsonDecode(message);
-              if (data['type'] == 'pong') {
-                final now = DateTime.now().millisecondsSinceEpoch;
-                latencyMs = (now - _lastPingSent).clamp(1, 999);
-                notifyListeners();
-              } else if (data['type'] == 'screen_sync') {
-                final int sw = (data['screenWidth'] is num) ? (data['screenWidth'] as num).toInt() : detectedPcWorkWidth;
-                final int sh = (data['screenHeight'] is num) ? (data['screenHeight'] as num).toInt() : detectedPcWorkHeight;
-                if (sw >= 64 && sh >= 64) {
-                  detectedPcWorkWidth = sw;
-                  detectedPcWorkHeight = sh;
-                  detectedPcAspectRatio = sw / sh;
-                  notifyListeners();
-                }
-              } else if (data['type'] == 'workingAreaDetected') {
-                final int w = (data['workWidth'] is num) ? (data['workWidth'] as num).toInt() : detectedPcWorkWidth;
-                final int h = (data['workHeight'] is num) ? (data['workHeight'] as num).toInt() : detectedPcWorkHeight;
-                if (w >= 64 && h >= 64) {
-                  detectedPcWorkWidth = w;
-                  detectedPcWorkHeight = h;
-                  detectedPcAspectRatio = w / h;
-                }
-                if (data['appName'] is String && (data['appName'] as String).isNotEmpty) {
-                  detectedPcAppName = data['appName'] as String;
-                }
-                if (data['targetMode'] is String) {
-                  targetMode = data['targetMode'] as String;
-                }
-                if (data['targetAvailable'] is bool) {
-                  targetAvailable = data['targetAvailable'] as bool;
-                }
-                if (data['canvasVerified'] is bool) {
-                  canvasVerified = data['canvasVerified'] as bool;
-                }
-                if (data['requiresCalibration'] is bool) {
-                  requiresCalibration = data['requiresCalibration'] as bool;
-                }
-                notifyListeners();
-              }
-            } catch (_) {}
-          }
-        },
-        onDone: () {
-          _handleDisconnect('PC Server closed the connection.');
-        },
-        onError: (err) {
-          _handleDisconnect('Connection error: $err');
-        },
-      );
-
-      _pingTimer?.cancel();
-      _pingTimer = Timer.periodic(const Duration(seconds: 2), (_) {
-        if (isConnected && _socket != null) {
-          _lastPingSent = DateTime.now().millisecondsSinceEpoch;
-          try {
-            _socket!.add(jsonEncode({'type': 'ping', 'timestamp': _lastPingSent}));
-          } catch (_) {}
-        }
-      });
-
+      _attachSocketStream(sock, generation, connectedLabel, selectedTransport, cleanPin);
       return true;
     } catch (e) {
-      isConnected = false;
-      isConnecting = false;
-      lastError = 'Could not reach $cleanIp:$port. Ensure AirCanvas.exe is running on PC.';
-      statusMessage = 'Connection failed';
-      notifyListeners();
+      if (generation == _sessionGeneration) {
+        isConnected = false;
+        isConnecting = false;
+        lastError = 'Connection error: $e';
+        statusMessage = 'Connection failed';
+        notifyListeners();
+      }
       return false;
     }
   }
 
-  void _handleDisconnect(String reason) {
+  Future<bool> connectFromQr(String qrUri) async {
+    final parsed = ConnectionContracts.parseQrPayload(qrUri, allowInsecureRelay: true);
+    if (parsed['valid'] != true) {
+      final code = parsed['error'] as String? ?? 'BAD_TOKEN';
+      lastError = ConnectionContracts.userFacingMessage(code);
+      statusMessage = 'QR Scan Error: $lastError';
+      notifyListeners();
+      return false;
+    }
+
+    final token = parsed['tok'] as String? ?? '';
+    final sid = parsed['sid'] as String? ?? '';
+    final lanList = (parsed['lan'] as List<dynamic>?)?.map((e) => e.toString()).toList() ?? [];
+    final relayUrl = parsed['relay'] as String?;
+
+    // 1. Try LAN candidates in order
+    for (final cand in lanList) {
+      final parts = cand.split(':');
+      final ip = parts[0];
+      final port = parts.length > 1 ? int.tryParse(parts[1]) ?? 9090 : 9090;
+      final ok = await connect(ip, port, qrToken: token);
+      if (ok) return true;
+    }
+
+    // 2. Fall back to relay
+    if (relayUrl != null && relayUrl.isNotEmpty && sid.isNotEmpty) {
+      return await connectToRelay(relayUrl, sid, token);
+    }
+
+    lastError = 'All LAN and Relay routes from QR code were unreachable.';
+    statusMessage = 'Connection failed';
+    notifyListeners();
+    return false;
+  }
+
+  Future<bool> connectToRelay(String relayUrl, String sessionId, String token) async {
+    _userExplicitDisconnect = false;
+    _reconnectTimer?.cancel();
+    final int generation = ++_sessionGeneration;
+
+    await _internalDisconnect(userInitiated: false);
+    isConnecting = true;
+    isConnected = false;
+    lastError = '';
+    statusMessage = 'Connecting via Remote Relay...';
+    notifyListeners();
+
+    try {
+      final sep = relayUrl.contains('?') ? '&' : '?';
+      final wsUrl = '$relayUrl${sep}sid=${Uri.encodeComponent(sessionId)}&tok=${Uri.encodeComponent(token)}&role=phone&deviceId=$_deviceId';
+      final sock = await WebSocket.connect(wsUrl).timeout(const Duration(seconds: 5));
+      if (generation != _sessionGeneration) {
+        sock.close();
+        return false;
+      }
+
+      _socket = sock;
+      _socket!.pingInterval = const Duration(seconds: 2);
+      connectedIp = relayUrl;
+      activeTransport = 'relay';
+      statusMessage = 'Authenticating via Relay...';
+      notifyListeners();
+
+      _attachSocketStream(sock, generation, 'Relay ($sessionId)', 'relay', '');
+      return true;
+    } catch (e) {
+      if (generation == _sessionGeneration) {
+        isConnected = false;
+        isConnecting = false;
+        lastError = ConnectionContracts.userFacingMessage('RELAY_UNAVAILABLE');
+        statusMessage = 'Relay unavailable';
+        notifyListeners();
+      }
+      return false;
+    }
+  }
+
+  void _attachSocketStream(WebSocket sock, int generation, String connectedLabel, String transport, String cleanPin) {
+    // Send hello message per B5 Session Layer
+    try {
+      final helloMsg = jsonEncode({
+        'type': 'hello',
+        'v': 1,
+        'deviceId': _deviceId,
+        'name': 'Android Tablet / Phone (APK)',
+        'platform': 'android',
+        'appVersion': '2.0.4',
+        'caps': ['pen', 'eraser']
+      });
+      sock.add(helloMsg);
+    } catch (_) {}
+
+    sock.listen(
+      (dynamic message) {
+        if (generation != _sessionGeneration) return;
+        if (message is String) {
+          try {
+            final data = jsonDecode(message);
+            final String type = data['type'] as String? ?? '';
+
+            if (type == 'challenge') {
+              final nonce = data['nonce'] as String? ?? '';
+              final serverId = data['serverId'] as String? ?? 'pc_server';
+              _currentServerId = serverId;
+              final pairingRequired = data['pairingRequired'] == true;
+
+              if (!pairingRequired && _storedSecrets.containsKey(serverId)) {
+                final secretHex = _storedSecrets[serverId]!;
+                final proof = ConnectionContracts.computeProof(
+                  secretBytes: ConnectionContracts.hexToBytes(secretHex),
+                  nonceBytes: ConnectionContracts.base64UrlDecode(nonce),
+                  deviceId: _deviceId,
+                );
+                sock.add(jsonEncode({'type': 'auth', 'proof': proof}));
+              } else {
+                if (_activePairToken != null && _activePairToken!.isNotEmpty) {
+                  sock.add(jsonEncode({'type': 'pair', 'token': _activePairToken}));
+                } else {
+                  sock.add(jsonEncode({'type': 'pair', 'pin': cleanPin.isEmpty ? pairingPin : cleanPin}));
+                }
+              }
+            } else if (type == 'paired') {
+              final secret = data['deviceSecret'] as String?;
+              if (secret != null && _currentServerId != null) {
+                _storedSecrets[_currentServerId!] = secret;
+              }
+            } else if (type == 'ready') {
+              isConnected = true;
+              isConnecting = false;
+              _reconnectAttempts = 0;
+              activeTransport = data['transport'] as String? ?? transport;
+              statusMessage = 'Connected ($connectedLabel) • 1:1 ${selectedPreset.shortLabel}';
+              notifyListeners();
+
+              // Resend tools and sync PC software working area
+              syncWorkingAreaToPC();
+            } else if (type == 'error') {
+              final code = data['code'] as String? ?? 'UNKNOWN';
+              final msg = ConnectionContracts.userFacingMessage(code);
+              lastError = msg;
+              _handleDisconnect(msg, retryable: false);
+            } else if (type == 'busy') {
+              lastError = ConnectionContracts.userFacingMessage('BUSY');
+              _handleDisconnect(lastError, retryable: false);
+            } else if (type == 'pong') {
+              final now = DateTime.now().millisecondsSinceEpoch;
+              latencyMs = (now - _lastPingSent).clamp(1, 999);
+              notifyListeners();
+            } else if (type == 'screen_sync') {
+              final int sw = (data['screenWidth'] is num) ? (data['screenWidth'] as num).toInt() : detectedPcWorkWidth;
+              final int sh = (data['screenHeight'] is num) ? (data['screenHeight'] as num).toInt() : detectedPcWorkHeight;
+              if (sw >= 64 && sh >= 64) {
+                detectedPcWorkWidth = sw;
+                detectedPcWorkHeight = sh;
+                detectedPcAspectRatio = sw / sh;
+                notifyListeners();
+              }
+            } else if (type == 'workingAreaDetected') {
+              final int w = (data['workWidth'] is num) ? (data['workWidth'] as num).toInt() : detectedPcWorkWidth;
+              final int h = (data['workHeight'] is num) ? (data['workHeight'] as num).toInt() : detectedPcWorkHeight;
+              if (w >= 64 && h >= 64) {
+                detectedPcWorkWidth = w;
+                detectedPcWorkHeight = h;
+                detectedPcAspectRatio = w / h;
+              }
+              if (data['appName'] is String && (data['appName'] as String).isNotEmpty) {
+                detectedPcAppName = data['appName'] as String;
+              }
+              if (data['targetMode'] is String) {
+                targetMode = data['targetMode'] as String;
+              }
+              if (data['targetAvailable'] is bool) {
+                targetAvailable = data['targetAvailable'] as bool;
+              }
+              if (data['canvasVerified'] is bool) {
+                canvasVerified = data['canvasVerified'] as bool;
+              }
+              if (data['requiresCalibration'] is bool) {
+                requiresCalibration = data['requiresCalibration'] as bool;
+              }
+              notifyListeners();
+            }
+          } catch (_) {}
+        }
+      },
+      onDone: () {
+        if (generation == _sessionGeneration) {
+          _handleDisconnect('PC Server closed the connection.', retryable: true);
+        }
+      },
+      onError: (err) {
+        if (generation == _sessionGeneration) {
+          _handleDisconnect('Connection error: $err', retryable: true);
+        }
+      },
+    );
+
+    _pingTimer?.cancel();
+    _pingTimer = Timer.periodic(const Duration(seconds: 2), (_) {
+      if (isConnected && _socket != null && generation == _sessionGeneration) {
+        _lastPingSent = DateTime.now().millisecondsSinceEpoch;
+        try {
+          _socket!.add(jsonEncode({'type': 'ping', 'timestamp': _lastPingSent}));
+        } catch (_) {}
+      }
+    });
+  }
+
+  void _handleDisconnect(String reason, {bool retryable = false}) {
     isConnected = false;
     isConnecting = false;
     _pingTimer?.cancel();
     statusMessage = reason;
     notifyListeners();
+
+    if (retryable && !_userExplicitDisconnect && connectedIp.isNotEmpty) {
+      if (_reconnectAttempts < 8) {
+        _reconnectAttempts++;
+        final double delaySec = ConnectionContracts.backoffDelay(_reconnectAttempts);
+        statusMessage = 'Reconnecting in ${delaySec.toStringAsFixed(1)}s (Attempt $_reconnectAttempts/8)...';
+        notifyListeners();
+
+        _reconnectTimer?.cancel();
+        _reconnectTimer = Timer(Duration(milliseconds: (delaySec * 1000).round()), () {
+          if (!_userExplicitDisconnect && !isConnected && !isConnecting) {
+            connect(connectedIp, connectedPort, pin: pairingPin, qrToken: _activePairToken);
+          }
+        });
+      } else {
+        statusMessage = 'Reconnect failed after 8 attempts. Tap Connect to try again.';
+        notifyListeners();
+      }
+    }
   }
 
-  Future<void> disconnect() async {
+  Future<void> _internalDisconnect({required bool userInitiated}) async {
     _pingTimer?.cancel();
+    _reconnectTimer?.cancel();
+    if (userInitiated) {
+      _userExplicitDisconnect = true;
+      _reconnectAttempts = 0;
+    }
     try {
       _udpSocket?.close();
     } catch (_) {}
@@ -688,6 +851,10 @@ class NetworkConnectionManager extends ChangeNotifier {
     _socket = null;
     isConnected = false;
     isConnecting = false;
+  }
+
+  Future<void> disconnect() async {
+    await _internalDisconnect(userInitiated: true);
     statusMessage = 'Disconnected';
     notifyListeners();
   }
@@ -994,8 +1161,11 @@ class _DrawingTabletPadViewState extends State<DrawingTabletPadView> with Widget
   }
 
   double _normalizePadAxis(double localCoord, double extent) {
-    if (!localCoord.isFinite || !extent.isFinite || extent < 2.0) {
+    if (localCoord.isNaN || !extent.isFinite || extent < 2.0) {
       return 0.5;
+    }
+    if (localCoord.isInfinite) {
+      return localCoord > 0 ? 1.0 : 0.0;
     }
     return (localCoord / (extent - 1.0)).clamp(0.0, 1.0);
   }
@@ -1891,7 +2061,7 @@ class _ConnectionSetupViewState extends State<ConnectionSetupView> {
       appBar: AppBar(
         backgroundColor: const Color(0xFF121222),
         title: const Text(
-          'Air Canvas v2.0.3 — Connect & PC Working Area',
+          'Air Canvas v2.0.4 — Connect & PC Working Area',
           style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
         ),
         actions: [
@@ -1998,6 +2168,23 @@ class _ConnectionSetupViewState extends State<ConnectionSetupView> {
                         },
                   icon: const Icon(Icons.usb, size: 18),
                   label: const Text('USB (127.0.0.1)'),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              Expanded(
+                child: OutlinedButton.icon(
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: const Color(0xFF00E5FF),
+                    side: const BorderSide(color: Color(0xFF00E5FF)),
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                  ),
+                  onPressed: () => _showQrEntryDialog(context),
+                  icon: const Icon(Icons.qr_code_scanner, size: 18),
+                  label: const Text('Scan QR / Paste Code'),
                 ),
               ),
             ],
@@ -2135,6 +2322,63 @@ class _ConnectionSetupViewState extends State<ConnectionSetupView> {
           ),
         ],
       ),
+    );
+  }
+
+  void _showQrEntryDialog(BuildContext ctx) {
+    final TextEditingController qrController = TextEditingController();
+    showDialog(
+      context: ctx,
+      builder: (dCtx) {
+        return AlertDialog(
+          backgroundColor: const Color(0xFF141428),
+          title: const Text('Scan QR / Enter Code', style: TextStyle(color: Colors.white, fontSize: 16)),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'Paste the aircanvas://pair URI or enter the QR payload from PC:',
+                style: TextStyle(color: Colors.white70, fontSize: 12),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: qrController,
+                maxLines: 3,
+                style: const TextStyle(fontSize: 12, color: Colors.white),
+                decoration: const InputDecoration(
+                  hintText: 'aircanvas://pair?v=1&sid=...',
+                  border: OutlineInputBorder(),
+                  isDense: true,
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dCtx),
+              child: const Text('Cancel', style: TextStyle(color: Colors.white54)),
+            ),
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFF00E5FF),
+                foregroundColor: Colors.black,
+              ),
+              onPressed: () async {
+                final uri = qrController.text.trim();
+                Navigator.pop(dCtx);
+                if (uri.isNotEmpty) {
+                  final ok = await widget.net.connectFromQr(uri);
+                  if (ok && mounted) {
+                    widget.onConnected();
+                  }
+                }
+              },
+              child: const Text('Connect QR'),
+            ),
+          ],
+        );
+      },
     );
   }
 }

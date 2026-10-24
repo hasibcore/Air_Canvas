@@ -1,0 +1,160 @@
+{
+  "version": 1,
+  "subnetMath": [
+    {
+      "ip": "192.168.1.20",
+      "mask": "255.255.255.0",
+      "expectedNetwork": "192.168.1.0",
+      "expectedBroadcast": "192.168.1.255",
+      "peer": "192.168.1.77",
+      "sameNetwork": true
+    },
+    {
+      "ip": "192.168.1.20",
+      "mask": "255.255.255.0",
+      "expectedNetwork": "192.168.1.0",
+      "expectedBroadcast": "192.168.1.255",
+      "peer": "192.168.2.77",
+      "sameNetwork": false
+    },
+    {
+      "ip": "192.168.0.20",
+      "mask": "255.255.254.0",
+      "expectedNetwork": "192.168.0.0",
+      "expectedBroadcast": "192.168.1.255",
+      "peer": "192.168.1.77",
+      "sameNetwork": true
+    },
+    {
+      "ip": "10.0.5.9",
+      "mask": "255.0.0.0",
+      "expectedNetwork": "10.0.0.0",
+      "expectedBroadcast": "10.255.255.255",
+      "peer": "10.200.1.1",
+      "sameNetwork": true
+    },
+    {
+      "ip": "172.16.4.3",
+      "mask": "255.255.240.0",
+      "expectedNetwork": "172.16.0.0",
+      "expectedBroadcast": "172.16.15.255",
+      "peer": "172.16.20.9",
+      "sameNetwork": false
+    },
+    {
+      "ip": "192.168.43.1",
+      "mask": "255.255.255.0",
+      "expectedNetwork": "192.168.43.0",
+      "expectedBroadcast": "192.168.43.255",
+      "peer": "192.168.43.120",
+      "sameNetwork": true
+    }
+  ],
+  "addressClassification": [
+    { "ip": "192.168.1.5", "expectedClass": "private", "advertisable": true },
+    { "ip": "10.1.2.3", "expectedClass": "private", "advertisable": true },
+    { "ip": "172.16.0.1", "expectedClass": "private", "advertisable": true },
+    { "ip": "172.32.0.1", "expectedClass": "public", "advertisable": false },
+    { "ip": "100.64.1.1", "expectedClass": "cgnat_overlay", "advertisable": true },
+    { "ip": "100.127.255.1", "expectedClass": "cgnat_overlay", "advertisable": true },
+    { "ip": "100.128.0.1", "expectedClass": "public", "advertisable": false },
+    { "ip": "169.254.3.4", "expectedClass": "link_local", "advertisable": false },
+    { "ip": "127.0.0.1", "expectedClass": "loopback", "advertisable": false },
+    { "ip": "8.8.8.8", "expectedClass": "public", "advertisable": false }
+  ],
+  "tokenSizes": [
+    { "entropyBits": 128, "rawBytes": 16, "base64urlLength": 22 },
+    { "entropyBits": 256, "rawBytes": 32, "base64urlLength": 43 }
+  ],
+  "qrPayloads": {
+    "valid": {
+      "uri": "aircanvas://pair?v=1&sid=Zk9mPq2WvB7nXc4TdR1uHA&tok=q3Vf0xTn8Zl2mA9bKcWd4g&exp=1767225600&name=Hasib%27s%20PC&lan=192.168.1.20%3A9090%2C10.0.0.5%3A9090&relay=wss%3A%2F%2Frelay.example.com%2Fr",
+      "expected": {
+        "v": 1,
+        "sid": "Zk9mPq2WvB7nXc4TdR1uHA",
+        "tok": "q3Vf0xTn8Zl2mA9bKcWd4g",
+        "exp": 1767225600,
+        "name": "Hasib's PC",
+        "lan": ["192.168.1.20:9090", "10.0.0.5:9090"],
+        "relay": "wss://relay.example.com/r"
+      }
+    },
+    "malformed": [
+      { "id": "M1", "change": "remove v", "uri": "aircanvas://pair?sid=Zk9mPq2WvB7nXc4TdR1uHA&tok=q3Vf0xTn8Zl2mA9bKcWd4g&exp=1767225600&name=Hasib%27s%20PC&lan=192.168.1.20%3A9090%2C10.0.0.5%3A9090&relay=wss%3A%2F%2Frelay.example.com%2Fr", "expectedError": "MissingField" },
+      { "id": "M2", "change": "v=2", "uri": "aircanvas://pair?v=2&sid=Zk9mPq2WvB7nXc4TdR1uHA&tok=q3Vf0xTn8Zl2mA9bKcWd4g&exp=1767225600&name=Hasib%27s%20PC&lan=192.168.1.20%3A9090%2C10.0.0.5%3A9090&relay=wss%3A%2F%2Frelay.example.com%2Fr", "expectedError": "UnsupportedVersion" },
+      { "id": "M3", "change": "tok of 21 characters", "uri": "aircanvas://pair?v=1&sid=Zk9mPq2WvB7nXc4TdR1uHA&tok=q3Vf0xTn8Zl2mA9bKcWd4&exp=1767225600&name=Hasib%27s%20PC&lan=192.168.1.20%3A9090%2C10.0.0.5%3A9090&relay=wss%3A%2F%2Frelay.example.com%2Fr", "expectedError": "BadToken" },
+      { "id": "M4", "change": "tok ending in + (not base64url)", "uri": "aircanvas://pair?v=1&sid=Zk9mPq2WvB7nXc4TdR1uHA&tok=q3Vf0xTn8Zl2mA9bKcWd4+&exp=1767225600&name=Hasib%27s%20PC&lan=192.168.1.20%3A9090%2C10.0.0.5%3A9090&relay=wss%3A%2F%2Frelay.example.com%2Fr", "expectedError": "BadToken" },
+      { "id": "M5", "change": "exp=abc", "uri": "aircanvas://pair?v=1&sid=Zk9mPq2WvB7nXc4TdR1uHA&tok=q3Vf0xTn8Zl2mA9bKcWd4g&exp=abc&name=Hasib%27s%20PC&lan=192.168.1.20%3A9090%2C10.0.0.5%3A9090&relay=wss%3A%2F%2Frelay.example.com%2Fr", "expectedError": "BadExp" },
+      { "id": "M6", "change": "lan port 0", "uri": "aircanvas://pair?v=1&sid=Zk9mPq2WvB7nXc4TdR1uHA&tok=q3Vf0xTn8Zl2mA9bKcWd4g&exp=1767225600&name=Hasib%27s%20PC&lan=192.168.1.20%3A0&relay=wss%3A%2F%2Frelay.example.com%2Fr", "expectedError": "BadPort" },
+      { "id": "M7", "change": "lan port 70000", "uri": "aircanvas://pair?v=1&sid=Zk9mPq2WvB7nXc4TdR1uHA&tok=q3Vf0xTn8Zl2mA9bKcWd4g&exp=1767225600&name=Hasib%27s%20PC&lan=192.168.1.20%3A70000&relay=wss%3A%2F%2Frelay.example.com%2Fr", "expectedError": "BadPort" },
+      { "id": "M8", "change": "five lan entries", "uri": "aircanvas://pair?v=1&sid=Zk9mPq2WvB7nXc4TdR1uHA&tok=q3Vf0xTn8Zl2mA9bKcWd4g&exp=1767225600&name=Hasib%27s%20PC&lan=192.168.1.20%3A9090%2C10.0.0.5%3A9090%2C192.168.1.21%3A9090%2C10.0.0.6%3A9090%2C10.0.0.7%3A9090&relay=wss%3A%2F%2Frelay.example.com%2Fr", "expectedError": "TooManyCandidates" },
+      { "id": "M9", "change": "lan=8.8.8.8:9090 (public)", "uri": "aircanvas://pair?v=1&sid=Zk9mPq2WvB7nXc4TdR1uHA&tok=q3Vf0xTn8Zl2mA9bKcWd4g&exp=1767225600&name=Hasib%27s%20PC&lan=8.8.8.8%3A9090&relay=wss%3A%2F%2Frelay.example.com%2Fr", "expectedError": "BadCandidate" },
+      { "id": "M10", "change": "lan=169.254.1.1:9090 (link-local)", "uri": "aircanvas://pair?v=1&sid=Zk9mPq2WvB7nXc4TdR1uHA&tok=q3Vf0xTn8Zl2mA9bKcWd4g&exp=1767225600&name=Hasib%27s%20PC&lan=169.254.1.1%3A9090&relay=wss%3A%2F%2Frelay.example.com%2Fr", "expectedError": "BadCandidate" },
+      { "id": "M11", "change": "relay=ws:// in release", "uri": "aircanvas://pair?v=1&sid=Zk9mPq2WvB7nXc4TdR1uHA&tok=q3Vf0xTn8Zl2mA9bKcWd4g&exp=1767225600&name=Hasib%27s%20PC&lan=192.168.1.20%3A9090&relay=ws%3A%2F%2Frelay.example.com%2Fr", "expectedError": "InsecureRelay" },
+      { "id": "M12", "change": "scheme http://", "uri": "http://pair?v=1&sid=Zk9mPq2WvB7nXc4TdR1uHA&tok=q3Vf0xTn8Zl2mA9bKcWd4g&exp=1767225600&name=Hasib%27s%20PC&lan=192.168.1.20%3A9090&relay=wss%3A%2F%2Frelay.example.com%2Fr", "expectedError": "BadScheme" },
+      { "id": "M13", "change": "tok given twice", "uri": "aircanvas://pair?v=1&sid=Zk9mPq2WvB7nXc4TdR1uHA&tok=q3Vf0xTn8Zl2mA9bKcWd4g&tok=q3Vf0xTn8Zl2mA9bKcWd4g&exp=1767225600&name=Hasib%27s%20PC&lan=192.168.1.20%3A9090&relay=wss%3A%2F%2Frelay.example.com%2Fr", "expectedError": "DuplicateKey" },
+      { "id": "M14", "change": "host open instead of pair", "uri": "aircanvas://open?v=1&sid=Zk9mPq2WvB7nXc4TdR1uHA&tok=q3Vf0xTn8Zl2mA9bKcWd4g&exp=1767225600&name=Hasib%27s%20PC&lan=192.168.1.20%3A9090&relay=wss%3A%2F%2Frelay.example.com%2Fr", "expectedError": "BadHost" },
+      { "id": "M15", "change": "payload longer than 512 bytes", "uri": "aircanvas://pair?v=1&sid=Zk9mPq2WvB7nXc4TdR1uHA&tok=q3Vf0xTn8Zl2mA9bKcWd4g&exp=1767225600&name=VeryLongPCName_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&lan=192.168.1.20%3A9090&relay=wss%3A%2F%2Frelay.example.com%2Fr", "expectedError": "TooLong" }
+    ]
+  },
+  "backoffSchedule": [
+    { "attempt": 1, "baseDelaySeconds": 0.5, "minJitter": 0.4, "maxJitter": 0.6 },
+    { "attempt": 2, "baseDelaySeconds": 1.0, "minJitter": 0.8, "maxJitter": 1.2 },
+    { "attempt": 3, "baseDelaySeconds": 2.0, "minJitter": 1.6, "maxJitter": 2.4 },
+    { "attempt": 4, "baseDelaySeconds": 4.0, "minJitter": 3.2, "maxJitter": 4.8 },
+    { "attempt": 5, "baseDelaySeconds": 8.0, "minJitter": 6.4, "maxJitter": 9.6 },
+    { "attempt": 6, "baseDelaySeconds": 10.0, "minJitter": 8.0, "maxJitter": 12.0 },
+    { "attempt": 7, "baseDelaySeconds": 10.0, "minJitter": 8.0, "maxJitter": 12.0 },
+    { "attempt": 8, "baseDelaySeconds": 10.0, "minJitter": 8.0, "maxJitter": 12.0 }
+  ],
+  "hmacProof": {
+    "secretHex": "00112233445566778899aabbccddeeff",
+    "nonceHex": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "deviceId": "device-123",
+    "prefix": "AIRCANVAS1",
+    "expectedHmacHex": "470b563c1772925788ba65e48ecc5d2057e2b1ac31a8b7a5da8e90303a5fcfa4"
+  },
+  "adbFixtures": [
+    {
+      "name": "single_device",
+      "raw": "List of devices attached\nR58M123ABC             device usb:1-1 product:panther model:Pixel_7 device:panther transport_id:1\n",
+      "expected": [
+        { "serial": "R58M123ABC", "state": "device", "model": "Pixel_7" }
+      ]
+    },
+    {
+      "name": "unauthorized_device",
+      "raw": "List of devices attached\nR58M123ABC             unauthorized usb:1-1 transport_id:2\n",
+      "expected": [
+        { "serial": "R58M123ABC", "state": "unauthorized" }
+      ]
+    },
+    {
+      "name": "offline_device",
+      "raw": "List of devices attached\nR58M123ABC             offline usb:1-1 transport_id:3\n",
+      "expected": [
+        { "serial": "R58M123ABC", "state": "offline" }
+      ]
+    },
+    {
+      "name": "multiple_devices",
+      "raw": "List of devices attached\nR58M123ABC             device usb:1-1 transport_id:1\nemulator-5554          device transport_id:4\n",
+      "expected": [
+        { "serial": "R58M123ABC", "state": "device" },
+        { "serial": "emulator-5554", "state": "device" }
+      ]
+    },
+    {
+      "name": "empty",
+      "raw": "List of devices attached\n\n",
+      "expected": []
+    },
+    {
+      "name": "garbage_lines",
+      "raw": "* daemon not running; starting now at tcp:5037\n* daemon started successfully\nList of devices attached\nR58M123ABC             device product:panther\nweird unknown warning line\n",
+      "expected": [
+        { "serial": "R58M123ABC", "state": "device" }
+      ]
+    }
+  ]
+}

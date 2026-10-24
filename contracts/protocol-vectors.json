@@ -177,6 +177,16 @@
       "error": "BadLength"
     }
   ],
+  "aspectFit": [
+    { "id": "E1", "pad": [800, 360], "target": [1920, 1080], "expected": [80, 0, 640, 360], "aspectErrorPct": 0.0 },
+    { "id": "E2", "pad": [800, 360], "target": [1920, 1200], "expected": [112, 0, 576, 360], "aspectErrorPct": 0.0 },
+    { "id": "E3", "pad": [600, 600], "target": [1920, 1080], "expected": [0, 131, 600, 338], "aspectErrorPct": 0.148 },
+    { "id": "E4", "pad": [800, 360], "target": [3440, 1440], "expected": [0, 12, 800, 335], "aspectErrorPct": 0.035 },
+    { "id": "E5", "pad": [360, 800], "target": [1080, 1920], "expected": [0, 80, 360, 640], "aspectErrorPct": 0.0 },
+    { "id": "E6", "pad": [800, 360], "target": [1080, 1920], "expected": [298, 0, 203, 360], "aspectErrorPct": 0.247 },
+    { "id": "E7", "pad": [960, 540], "target": [1920, 1080], "expected": [0, 0, 960, 540], "aspectErrorPct": 0.0 },
+    { "id": "E8", "pad": [411, 891], "target": [1366, 768], "expected": [0, 330, 411, 231], "aspectErrorPct": 0.032 }
+  ],
   "projection": [
     { "area": [0, 0, 1920, 1080], "norm": [0.5, 0.5], "expected": [960, 540] },
     { "area": [0, 0, 1920, 1080], "norm": [0.0, 0.0], "expected": [0, 0] },
@@ -194,6 +204,13 @@
     { "area": [1920, -200, 2560, 1440], "norm": [0.0, 0.0], "expected": [1920, -200] },
     { "area": [1920, -200, 2560, 1440], "norm": [1.0, 1.0], "expected": [4479, 1239] },
     { "area": [1920, -200, 2560, 1440], "norm": [0.5, 0.5], "expected": [3200, 520] },
+    { "area": [100, 50, 1280, 720], "norm": [0.0, 0.0], "expected": [100, 50] },
+    { "area": [100, 50, 1280, 720], "norm": [1.0, 1.0], "expected": [1379, 769] },
+    { "area": [100, 50, 1280, 720], "norm": [0.5, 0.5], "expected": [740, 410] },
+    { "area": [100, 50, 1280, 720], "norm": [0.25, 0.75], "expected": [420, 589] },
+    { "area": [-300, 100, 1000, 600], "norm": [0.0, 0.0], "expected": [-300, 100] },
+    { "area": [-300, 100, 1000, 600], "norm": [1.0, 1.0], "expected": [699, 699] },
+    { "area": [-300, 100, 1000, 600], "norm": [0.5, 0.5], "expected": [200, 400] },
     { "area": [0, 0, 6, 6], "norm": [0.5, 0.5], "expected": [3, 3] },
     { "area": [0, 0, 6, 6], "norm": [1.0, 1.0], "expected": [5, 5] }
   ],
@@ -204,6 +221,18 @@
     { "pad": [800, 400], "local": [-5, 500], "expected": [0.0, 1.0] },
     { "pad": [1, 400], "local": [0, 200], "expected": [0.5, 0.5] },
     { "pad": [800, 1], "local": [400, 0], "expected": [0.5, 0.5] }
+  ],
+  "activeNormalization": [
+    { "active": [80, 0, 640, 360], "local": [80, 0], "expected": [0.0, 0.0] },
+    { "active": [80, 0, 640, 360], "local": [719, 359], "expected": [1.0, 1.0] },
+    { "active": [80, 0, 640, 360], "local": [399.5, 179.5], "expected": [0.5, 0.5] },
+    { "active": [80, 0, 640, 360], "local": [40, 100], "expected": [0.0, 0.2785515320334262] },
+    { "active": [80, 0, 640, 360], "local": [790, 400], "expected": [1.0, 1.0] },
+    { "active": [0, 0, 1, 400], "local": [0, 200], "expected": [0.5, 0.5] },
+    { "active": [0, 0, 800, 1], "local": [400, 0], "expected": [0.5, 0.5] }
+  ],
+  "rectConversion": [
+    { "ltrb": [100, 50, 1380, 770], "expected": { "left": 100, "top": 50, "width": 1280, "height": 720 } }
   ],
   "timestampWraparound": [
     {

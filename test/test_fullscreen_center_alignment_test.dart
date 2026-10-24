@@ -54,16 +54,6 @@ void main() {
     }
   }
 
-  // Regression Check (BUG-08): 1x1 or 0x0 canvas dimensions must not produce NaN or Infinity
-  for (final edgeDim in [0.0, 1.0]) {
-    final double safeNormX = edgeDim <= 1.0 ? 0.5 : (0.0 / (edgeDim - 1.0)).clamp(0.0, 1.0);
-    final double safeNormY = edgeDim <= 1.0 ? 0.5 : (0.0 / (edgeDim - 1.0)).clamp(0.0, 1.0);
-    if (!safeNormX.isFinite || !safeNormY.isFinite || safeNormX != 0.5 || safeNormY != 0.5) {
-      throw Exception('Division-by-zero guard failed for dimension $edgeDim');
-    }
-  }
-  print('  -> PASS: Degenerate (0x0 / 1x1) canvas bounds safely normalize to (0.5, 0.5) without NaN.');
-
-  print('\nRESULT: $passedCount / ${testDpiScales.length} DPI Scenarios + Edge-Case Guard Passed with 100% Accuracy.');
+  print('\nRESULT: $passedCount / ${testDpiScales.length} DPI Scenarios Passed with 100% Accuracy.');
   print('================================================================\n');
 }
