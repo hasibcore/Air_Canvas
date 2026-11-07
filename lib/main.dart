@@ -20,7 +20,7 @@ class AirCanvasApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Air Canvas v2.0.3',
+      title: 'Air Canvas v2.0.7',
       debugShowCheckedModeBanner: false,
       theme: ThemeData.dark().copyWith(
         scaffoldBackgroundColor: const Color(0xFF0A0A14),
@@ -178,6 +178,7 @@ class DiscoveredPC {
 // ==============================================================================
 class NetworkConnectionManager extends ChangeNotifier {
   WebSocket? _socket;
+  WebSocket? _secondaryRelaySocket;
   RawDatagramSocket? _udpSocket;
   RawDatagramSocket? _beaconSocket;
   bool isConnected = false;
@@ -257,6 +258,9 @@ class NetworkConnectionManager extends ChangeNotifier {
         'right': selectedPreset.right,
       });
       _socket!.add(msg);
+      try {
+        _secondaryRelaySocket?.add(msg);
+      } catch (_) {}
     } catch (_) {}
   }
 
@@ -660,105 +664,49 @@ class NetworkConnectionManager extends ChangeNotifier {
       notifyListeners();
 
       // Send formal connect_request handshake + discovery_ping + sync PC Software Working Area preset
+      final String handshakeJson = jsonEncode({
+        'type': 'connect_request',
+        'senderId': 'android_apk_${DateTime.now().millisecondsSinceEpoch}',
+        'senderMode': 'client',
+        'pin': cleanPin,
+        'transportType': selectedTransport == 'usb' ? 'usb' : 'wifi',
+        'deviceInfo': {
+          'deviceName': 'Android Tablet / Phone (APK)',
+          'deviceModel': 'Android Stylus Digitizer',
+          'platform': 'android',
+          'screenWidth': 1920,
+          'screenHeight': 1080,
+          'hasStylusSupport': true,
+          'maxPressure': 1.0,
+        },
+        'timestamp': DateTime.now().millisecondsSinceEpoch,
+      });
+      final String discPingJson = jsonEncode({
+        'type': 'discovery_ping',
+        'timestamp': DateTime.now().millisecondsSinceEpoch,
+      });
+
       try {
-        _socket!.add(jsonEncode({
-          'type': 'connect_request',
-          'senderId': 'android_apk_${DateTime.now().millisecondsSinceEpoch}',
-          'senderMode': 'client',
-          'pin': cleanPin,
-          'transportType': selectedTransport == 'usb' ? 'usb' : 'wifi',
-          'deviceInfo': {
-            'deviceName': 'Android Tablet / Phone (APK)',
-            'deviceModel': 'Android Stylus Digitizer',
-            'platform': 'android',
-            'screenWidth': 1920,
-            'screenHeight': 1080,
-            'hasStylusSupport': true,
-            'maxPressure': 1.0,
-          },
-          'timestamp': DateTime.now().millisecondsSinceEpoch,
-        }));
-        _socket!.add(jsonEncode({
-          'type': 'discovery_ping',
-          'timestamp': DateTime.now().millisecondsSinceEpoch,
-        }));
+        _socket!.add(handshakeJson);
+        _socket!.add(discPingJson);
       } catch (_) {}
+
+      // If connected via Cloud Relay, also open a mirror socket to the alternate relay host (ais-dev / ais-pre)
+      // so whichever URL or PC Host the user has open receives strokes & handshakes simultaneously!
+      if (selectedTransport == 'cloud') {
+        final String altRelayHost = connectedLabel.contains('Dev') ? kCloudRelayHost : kDevRelayHost;
+        _connectSecondaryRelayMirror(
+          'wss://$altRelayHost/ws?pin=$cleanPin&role=client&name=Android-APK&transport=cloud',
+          handshakeJson,
+          discPingJson,
+        );
+      }
+
       syncWorkingAreaToPC();
       _flushOutboundQueue();
 
       _socket!.listen(
-        (dynamic message) {
-          if (message is String) {
-            try {
-              final data = jsonDecode(message);
-              if (data['type'] == 'pong') {
-                final now = DateTime.now().millisecondsSinceEpoch;
-                latencyMs = (now - _lastPingSent).clamp(1, 999);
-                notifyListeners();
-              } else if (data['type'] == 'discovery_pong' || data['type'] == 'peer_connected') {
-                final String? hostIp = data['ip'] is String ? (data['ip'] as String).trim() : null;
-                final int hostPort = (data['port'] is num) ? (data['port'] as num).toInt() : 9090;
-                if (hostIp != null &&
-                    hostIp.isNotEmpty &&
-                    hostIp != 'relay' &&
-                    hostIp != '0.0.0.0' &&
-                    hostIp != '127.0.0.1') {
-                  detectedSubnetHint = hostIp;
-                  if (!discoveredDevices.any((d) => d.ip == hostIp)) {
-                    discoveredDevices.insert(
-                      0,
-                      DiscoveredPC(
-                        name: (data['name'] is String && (data['name'] as String).isNotEmpty)
-                            ? '${data['name']} ($hostIp)'
-                            : 'Windows PC ($hostIp)',
-                        ip: hostIp,
-                        port: hostPort,
-                        latencyMs: 2,
-                      ),
-                    );
-                  }
-                  if (activeTransport == 'cloud') {
-                    _tryUpgradeToDirectLan(hostIp, hostPort);
-                  }
-                  notifyListeners();
-                }
-              } else if (data['type'] == 'screen_sync') {
-                final int sw = (data['screenWidth'] is num) ? (data['screenWidth'] as num).toInt() : detectedPcWorkWidth;
-                final int sh = (data['screenHeight'] is num) ? (data['screenHeight'] as num).toInt() : detectedPcWorkHeight;
-                if (sw >= 64 && sh >= 64) {
-                  detectedPcWorkWidth = sw;
-                  detectedPcWorkHeight = sh;
-                  detectedPcAspectRatio = sw / sh;
-                  notifyListeners();
-                }
-              } else if (data['type'] == 'workingAreaDetected') {
-                final int w = (data['workWidth'] is num) ? (data['workWidth'] as num).toInt() : detectedPcWorkWidth;
-                final int h = (data['workHeight'] is num) ? (data['workHeight'] as num).toInt() : detectedPcWorkHeight;
-                if (w >= 64 && h >= 64) {
-                  detectedPcWorkWidth = w;
-                  detectedPcWorkHeight = h;
-                  detectedPcAspectRatio = w / h;
-                }
-                if (data['appName'] is String && (data['appName'] as String).isNotEmpty) {
-                  detectedPcAppName = data['appName'] as String;
-                }
-                if (data['targetMode'] is String) {
-                  targetMode = data['targetMode'] as String;
-                }
-                if (data['targetAvailable'] is bool) {
-                  targetAvailable = data['targetAvailable'] as bool;
-                }
-                if (data['canvasVerified'] is bool) {
-                  canvasVerified = data['canvasVerified'] as bool;
-                }
-                if (data['requiresCalibration'] is bool) {
-                  requiresCalibration = data['requiresCalibration'] as bool;
-                }
-                notifyListeners();
-              }
-            } catch (_) {}
-          }
-        },
+        (dynamic message) => _handleIncomingSocketMessage(message),
         onDone: () {
           _handleDisconnect('Reconnecting to PC Server...');
         },
@@ -771,8 +719,12 @@ class NetworkConnectionManager extends ChangeNotifier {
       _pingTimer = Timer.periodic(const Duration(seconds: 2), (_) {
         if (isConnected && _socket != null) {
           _lastPingSent = DateTime.now().millisecondsSinceEpoch;
+          final pingStr = jsonEncode({'type': 'ping', 'timestamp': _lastPingSent});
           try {
-            _socket!.add(jsonEncode({'type': 'ping', 'timestamp': _lastPingSent}));
+            _socket!.add(pingStr);
+          } catch (_) {}
+          try {
+            _secondaryRelaySocket?.add(pingStr);
           } catch (_) {}
         }
       });
@@ -789,6 +741,107 @@ class NetworkConnectionManager extends ChangeNotifier {
     }
   }
 
+  Future<void> _connectSecondaryRelayMirror(
+    String mirrorUrl,
+    String handshakeJson,
+    String discPingJson,
+  ) async {
+    try {
+      await _secondaryRelaySocket?.close();
+    } catch (_) {}
+    _secondaryRelaySocket = null;
+    try {
+      final sec = await WebSocket.connect(mirrorUrl).timeout(const Duration(milliseconds: 2500));
+      sec.pingInterval = const Duration(seconds: 2);
+      _secondaryRelaySocket = sec;
+      try {
+        sec.add(handshakeJson);
+        sec.add(discPingJson);
+      } catch (_) {}
+      sec.listen(
+        (dynamic message) => _handleIncomingSocketMessage(message),
+        onDone: () {
+          _secondaryRelaySocket = null;
+        },
+        onError: (_) {
+          _secondaryRelaySocket = null;
+        },
+      );
+    } catch (_) {}
+  }
+
+  void _handleIncomingSocketMessage(dynamic message) {
+    if (message is! String) return;
+    try {
+      final data = jsonDecode(message);
+      if (data['type'] == 'pong') {
+        final now = DateTime.now().millisecondsSinceEpoch;
+        latencyMs = (now - _lastPingSent).clamp(1, 999);
+        notifyListeners();
+      } else if (data['type'] == 'discovery_pong' || data['type'] == 'peer_connected') {
+        final String? hostIp = data['ip'] is String ? (data['ip'] as String).trim() : null;
+        final int hostPort = (data['port'] is num) ? (data['port'] as num).toInt() : 9090;
+        if (hostIp != null &&
+            hostIp.isNotEmpty &&
+            hostIp != 'relay' &&
+            hostIp != '0.0.0.0' &&
+            hostIp != '127.0.0.1') {
+          detectedSubnetHint = hostIp;
+          if (!discoveredDevices.any((d) => d.ip == hostIp)) {
+            discoveredDevices.insert(
+              0,
+              DiscoveredPC(
+                name: (data['name'] is String && (data['name'] as String).isNotEmpty)
+                    ? '${data['name']} ($hostIp)'
+                    : 'Windows PC ($hostIp)',
+                ip: hostIp,
+                port: hostPort,
+                latencyMs: 2,
+              ),
+            );
+          }
+          if (activeTransport == 'cloud') {
+            _tryUpgradeToDirectLan(hostIp, hostPort);
+          }
+          notifyListeners();
+        }
+      } else if (data['type'] == 'screen_sync') {
+        final int sw = (data['screenWidth'] is num) ? (data['screenWidth'] as num).toInt() : detectedPcWorkWidth;
+        final int sh = (data['screenHeight'] is num) ? (data['screenHeight'] as num).toInt() : detectedPcWorkHeight;
+        if (sw >= 64 && sh >= 64) {
+          detectedPcWorkWidth = sw;
+          detectedPcWorkHeight = sh;
+          detectedPcAspectRatio = sw / sh;
+          notifyListeners();
+        }
+      } else if (data['type'] == 'workingAreaDetected') {
+        final int w = (data['workWidth'] is num) ? (data['workWidth'] as num).toInt() : detectedPcWorkWidth;
+        final int h = (data['workHeight'] is num) ? (data['workHeight'] as num).toInt() : detectedPcWorkHeight;
+        if (w >= 64 && h >= 64) {
+          detectedPcWorkWidth = w;
+          detectedPcWorkHeight = h;
+          detectedPcAspectRatio = w / h;
+        }
+        if (data['appName'] is String && (data['appName'] as String).isNotEmpty) {
+          detectedPcAppName = data['appName'] as String;
+        }
+        if (data['targetMode'] is String) {
+          targetMode = data['targetMode'] as String;
+        }
+        if (data['targetAvailable'] is bool) {
+          targetAvailable = data['targetAvailable'] as bool;
+        }
+        if (data['canvasVerified'] is bool) {
+          canvasVerified = data['canvasVerified'] as bool;
+        }
+        if (data['requiresCalibration'] is bool) {
+          requiresCalibration = data['requiresCalibration'] as bool;
+        }
+        notifyListeners();
+      }
+    } catch (_) {}
+  }
+
   void _flushOutboundQueue() {
     if (!isConnected || _socket == null || _outboundQueue.isEmpty) return;
     final pending = List<Uint8List>.from(_outboundQueue);
@@ -796,6 +849,7 @@ class NetworkConnectionManager extends ChangeNotifier {
     for (final frame in pending) {
       try {
         _socket!.add(frame);
+        _secondaryRelaySocket?.add(frame);
         packetsSent++;
       } catch (_) {}
     }
@@ -834,6 +888,10 @@ class NetworkConnectionManager extends ChangeNotifier {
       _udpSocket?.close();
     } catch (_) {}
     _udpSocket = null;
+    try {
+      await _secondaryRelaySocket?.close();
+    } catch (_) {}
+    _secondaryRelaySocket = null;
     try {
       await _socket?.close();
     } catch (_) {}
@@ -941,6 +999,9 @@ class NetworkConnectionManager extends ChangeNotifier {
     if (isConnected && _socket != null) {
       try {
         _socket!.add(frame);
+        try {
+          _secondaryRelaySocket?.add(frame);
+        } catch (_) {}
         packetsSent++;
         return;
       } catch (_) {}
@@ -969,6 +1030,9 @@ class NetworkConnectionManager extends ChangeNotifier {
         },
       });
       _socket!.add(msg);
+      try {
+        _secondaryRelaySocket?.add(msg);
+      } catch (_) {}
     } catch (_) {}
   }
 
@@ -982,6 +1046,9 @@ class NetworkConnectionManager extends ChangeNotifier {
         },
       });
       _socket!.add(msg);
+      try {
+        _secondaryRelaySocket?.add(msg);
+      } catch (_) {}
     } catch (_) {}
   }
 }
@@ -2057,7 +2124,7 @@ class _ConnectionSetupViewState extends State<ConnectionSetupView> {
       appBar: AppBar(
         backgroundColor: const Color(0xFF121222),
         title: const Text(
-          'Air Canvas v2.0.6 — Connect & PC Working Area',
+          'Air Canvas v2.0.7 — Connect & PC Working Area',
           style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
         ),
         actions: [

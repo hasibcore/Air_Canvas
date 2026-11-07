@@ -1,6 +1,6 @@
 // ==============================================================================================
 // AirCanvasServer.cs - High-Performance Windows Native Input Server & Synthetic Pen Injector
-// Version: 2.0.6 PRO
+// Version: 2.0.7 PRO
 // Features:
 // - 100% Mobile Full-Screen Pad -> PC Software Working Area 1:1 Mapping
 // - Auto-Detect Active PC Software Window & Canvas Working Area (Photoshop, Krita, OneNote, etc.)
@@ -122,10 +122,11 @@ namespace AirCanvas.Server
 
     public class AirCanvasServer
     {
-        public const string VERSION = "2.0.6 PRO";
+        public const string VERSION = "2.0.7 PRO";
         public const int DEFAULT_PORT = 9090;
         public const int DISCOVERY_PORT = 9091;
         public const string CLOUD_RELAY_HOST = "ais-pre-2wmsbni7lh5hjxll4p27tc-851170313359.asia-northeast1.run.app";
+        public const string DEV_RELAY_HOST = "ais-dev-2wmsbni7lh5hjxll4p27tc-851170313359.asia-northeast1.run.app";
 
         // Monitor & DPI state
         public static ScreenBounds TargetScreen;
@@ -678,77 +679,16 @@ namespace AirCanvas.Server
                     IntPtr hwnd = GetForegroundWindow();
                     if (hwnd != IntPtr.Zero)
                     {
-                        RECT clientRect;
-                        if (GetClientRect(hwnd, out clientRect))
-                        {
-                            int cw = clientRect.Right - clientRect.Left;
-                            int ch = clientRect.Bottom - clientRect.Top;
-                            if (cw >= 320 && ch >= 240)
-                            {
-                                POINT topLeft = new POINT { X = clientRect.Left, Y = clientRect.Top };
-                                if (ClientToScreen(hwnd, ref topLeft))
-                                {
-                                    baseLeft = topLeft.X;
-                                    baseTop = topLeft.Y;
-                                    baseWidth = cw;
-                                    baseHeight = ch;
-                                }
-                            }
-                        }
-
-                        // Tier 1: Scan child windows for a dedicated central drawable canvas HWND
-                        int parentArea = Math.Max(1, baseWidth * baseHeight);
-                        EnumChildWindows(hwnd, (childHwnd, lParam) =>
-                        {
-                            try
-                            {
-                                if (!IsWindowVisible(childHwnd)) return true;
-                                RECT r;
-                                if (!GetWindowRect(childHwnd, out r)) return true;
-                                int w = r.Right - r.Left;
-                                int h = r.Bottom - r.Top;
-                                if (w < 240 || h < 180) return true;
-                                int area = w * h;
-                                double ratio = (double)area / parentArea;
-
-                                StringBuilder clsSb = new StringBuilder(128);
-                                GetClassName(childHwnd, clsSb, 128);
-                                string cls = clsSb.ToString().ToLowerInvariant();
-
-                                bool isKnownCanvasClass =
-                                    cls.Contains("mspaintview") ||
-                                    cls.Contains("afxframeorview") ||
-                                    cls.Contains("canvas") ||
-                                    cls.Contains("acrobat") ||
-                                    cls.Contains("avl_avview") ||
-                                    cls.Contains("qwidget") ||
-                                    cls.Contains("owl.document");
-
-                                // Accept a dedicated child canvas that occupies 30%..94% of the parent window
-                                if ((isKnownCanvasClass && ratio >= 0.25 && ratio <= 0.98) ||
-                                    (ratio >= 0.38 && ratio <= 0.93 && r.Top >= baseTop + 24))
-                                {
-                                    if (area > bestChildArea)
-                                    {
-                                        bestChildArea = area;
-                                        bestChildRect = r;
-                                        foundNativeChildCanvas = true;
-                                    }
-                                }
-                            }
-                            catch { }
-                            return true;
-                        }, IntPtr.Zero);
-
-                        // Tier 2: Inspect Window Title + Process Executable Name
                         StringBuilder sb = new StringBuilder(256);
                         GetWindowText(hwnd, sb, 256);
                         string title = sb.ToString().ToLowerInvariant();
                         string procName = "";
+                        int fgPid = 0;
                         try
                         {
                             uint pid;
                             GetWindowThreadProcessId(hwnd, out pid);
+                            fgPid = (int)pid;
                             if (pid != 0)
                             {
                                 procName = Process.GetProcessById((int)pid).ProcessName.ToLowerInvariant();
@@ -756,36 +696,113 @@ namespace AirCanvas.Server
                         }
                         catch { }
 
-                        string combined = title + " " + procName;
+                        int currentPid = Process.GetCurrentProcess().Id;
+                        bool isSelfOrShellWindow =
+                            fgPid == currentPid ||
+                            procName.Contains("aircanvas") ||
+                            title.Contains("air canvas") ||
+                            procName == "explorer" ||
+                            procName == "searchhost" ||
+                            procName == "shellexperiencehost" ||
+                            procName == "applicationframehost" ||
+                            procName == "taskmgr";
 
-                        if (combined.Contains("photoshop") || combined.Contains("krita") || combined.Contains("clipstudio") || combined.Contains("clip studio") || combined.Contains("gimp") || combined.Contains("sai"))
+                        if (!isSelfOrShellWindow)
                         {
-                            mTop = 0.08; mBottom = 0.04; mLeft = 0.06; mRight = 0.18;
-                            detectedApp = "Photoshop / Krita / CSP";
-                        }
-                        else if (combined.Contains("onenote") || combined.Contains("acrobat") || combined.Contains("acrord32") || combined.Contains("pdf") || combined.Contains("xournal") || combined.Contains("sumatrapdf") || combined.Contains("foxit"))
-                        {
-                            mTop = 0.14; mBottom = 0.02; mLeft = 0.04; mRight = 0.04;
-                            detectedApp = "OneNote / PDF Annotator";
-                        }
-                        else if (combined.Contains("illustrator") || combined.Contains("affinity") || combined.Contains("designer") || combined.Contains("inkscape") || combined.Contains("coreldraw"))
-                        {
-                            mTop = 0.09; mBottom = 0.03; mLeft = 0.05; mRight = 0.16;
-                            detectedApp = "Illustrator / Vector";
-                        }
-                        else if (combined.Contains("blender") || combined.Contains("zbrush") || combined.Contains("maya") || combined.Contains("3dsmax"))
-                        {
-                            mTop = 0.06; mBottom = 0.05; mLeft = 0.05; mRight = 0.15;
-                            detectedApp = "Blender / 3D Viewport";
-                        }
-                        else if (combined.Contains("mspaint") || combined.Contains("paint") || combined.Contains("whiteboard") || combined.Contains("powerpnt") || combined.Contains("jamboard") || combined.Contains("excalidraw") || combined.Contains("figma"))
-                        {
-                            mTop = 0.15; mBottom = 0.04; mLeft = 0.01; mRight = 0.01;
-                            detectedApp = "Paint / Whiteboard";
-                        }
-                        else if (!string.IsNullOrEmpty(procName))
-                        {
-                            detectedApp = "Auto (" + procName + ")";
+                            RECT clientRect;
+                            if (GetClientRect(hwnd, out clientRect))
+                            {
+                                int cw = clientRect.Right - clientRect.Left;
+                                int ch = clientRect.Bottom - clientRect.Top;
+                                if (cw >= 480 && ch >= 320)
+                                {
+                                    POINT topLeft = new POINT { X = clientRect.Left, Y = clientRect.Top };
+                                    if (ClientToScreen(hwnd, ref topLeft))
+                                    {
+                                        baseLeft = topLeft.X;
+                                        baseTop = topLeft.Y;
+                                        baseWidth = cw;
+                                        baseHeight = ch;
+                                    }
+                                }
+                            }
+
+                            // Tier 1: Scan child windows for a dedicated central drawable canvas HWND
+                            int parentArea = Math.Max(1, baseWidth * baseHeight);
+                            EnumChildWindows(hwnd, (childHwnd, lParam) =>
+                            {
+                                try
+                                {
+                                    if (!IsWindowVisible(childHwnd)) return true;
+                                    RECT r;
+                                    if (!GetWindowRect(childHwnd, out r)) return true;
+                                    int w = r.Right - r.Left;
+                                    int h = r.Bottom - r.Top;
+                                    if (w < 240 || h < 180) return true;
+                                    int area = w * h;
+                                    double ratio = (double)area / parentArea;
+
+                                    StringBuilder clsSb = new StringBuilder(128);
+                                    GetClassName(childHwnd, clsSb, 128);
+                                    string cls = clsSb.ToString().ToLowerInvariant();
+
+                                    bool isKnownCanvasClass =
+                                        cls.Contains("mspaintview") ||
+                                        cls.Contains("afxframeorview") ||
+                                        cls.Contains("canvas") ||
+                                        cls.Contains("acrobat") ||
+                                        cls.Contains("avl_avview") ||
+                                        cls.Contains("qwidget") ||
+                                        cls.Contains("owl.document");
+
+                                    // Accept a dedicated child canvas that occupies 30%..94% of the parent window
+                                    if ((isKnownCanvasClass && ratio >= 0.25 && ratio <= 0.98) ||
+                                        (ratio >= 0.38 && ratio <= 0.93 && r.Top >= baseTop + 24))
+                                    {
+                                        if (area > bestChildArea)
+                                        {
+                                            bestChildArea = area;
+                                            bestChildRect = r;
+                                            foundNativeChildCanvas = true;
+                                        }
+                                    }
+                                }
+                                catch { }
+                                return true;
+                            }, IntPtr.Zero);
+
+                            // Tier 2: Inspect Window Title + Process Executable Name
+                            string combined = title + " " + procName;
+
+                            if (combined.Contains("photoshop") || combined.Contains("krita") || combined.Contains("clipstudio") || combined.Contains("clip studio") || combined.Contains("gimp") || combined.Contains("sai"))
+                            {
+                                mTop = 0.08; mBottom = 0.04; mLeft = 0.06; mRight = 0.18;
+                                detectedApp = "Photoshop / Krita / CSP";
+                            }
+                            else if (combined.Contains("onenote") || combined.Contains("acrobat") || combined.Contains("acrord32") || combined.Contains("pdf") || combined.Contains("xournal") || combined.Contains("sumatrapdf") || combined.Contains("foxit"))
+                            {
+                                mTop = 0.14; mBottom = 0.02; mLeft = 0.04; mRight = 0.04;
+                                detectedApp = "OneNote / PDF Annotator";
+                            }
+                            else if (combined.Contains("illustrator") || combined.Contains("affinity") || combined.Contains("designer") || combined.Contains("inkscape") || combined.Contains("coreldraw"))
+                            {
+                                mTop = 0.09; mBottom = 0.03; mLeft = 0.05; mRight = 0.16;
+                                detectedApp = "Illustrator / Vector";
+                            }
+                            else if (combined.Contains("blender") || combined.Contains("zbrush") || combined.Contains("maya") || combined.Contains("3dsmax"))
+                            {
+                                mTop = 0.06; mBottom = 0.05; mLeft = 0.05; mRight = 0.15;
+                                detectedApp = "Blender / 3D Viewport";
+                            }
+                            else if (combined.Contains("mspaint") || combined.Contains("paint") || combined.Contains("whiteboard") || combined.Contains("powerpnt") || combined.Contains("jamboard") || combined.Contains("excalidraw") || combined.Contains("figma"))
+                            {
+                                mTop = 0.15; mBottom = 0.04; mLeft = 0.01; mRight = 0.01;
+                                detectedApp = "Paint / Whiteboard";
+                            }
+                            else if (!string.IsNullOrEmpty(procName))
+                            {
+                                detectedApp = "Auto (" + procName + ")";
+                            }
                         }
                     }
                 }
@@ -1123,10 +1140,6 @@ namespace AirCanvas.Server
                         };
                         InjectSyntheticPointerInput(SyntheticPenDevice, new[] { hoverMoveInfo }, 1);
 
-                        if (_lastStateWasHover)
-                        {
-                            Thread.Sleep(1);
-                        }
                         pointerFlags |= POINTER_FLAG_DOWN | POINTER_FLAG_INCONTACT | POINTER_FLAG_INRANGE | POINTER_FLAG_FIRSTBUTTON;
                         _lastStateWasHover = false;
                         _isPenInContact = true;
@@ -1221,11 +1234,17 @@ namespace AirCanvas.Server
             {
                 if (eventType == "pointerDown")
                 {
+                    mouse_event(MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK | MOUSEEVENTF_MOVE, (uint)absX, (uint)absY, 0, UIntPtr.Zero);
                     mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, UIntPtr.Zero);
                     _isPenInContact = true;
                 }
+                else if (eventType == "pointerMove")
+                {
+                    mouse_event(MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK | MOUSEEVENTF_MOVE, (uint)absX, (uint)absY, 0, UIntPtr.Zero);
+                }
                 else if (eventType == "pointerUp")
                 {
+                    mouse_event(MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK | MOUSEEVENTF_MOVE, (uint)absX, (uint)absY, 0, UIntPtr.Zero);
                     mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, UIntPtr.Zero);
                     _isPenInContact = false;
                 }
@@ -1619,19 +1638,26 @@ namespace AirCanvas.Server
             }
             catch { }
 
+            StartCloudRelayBridgeForHost(CLOUD_RELAY_HOST, true);
+            StartCloudRelayBridgeForHost(DEV_RELAY_HOST, false);
+        }
+
+        private static void StartCloudRelayBridgeForHost(string relayHost, bool isPrimary)
+        {
             Thread cloudThread = new Thread(() =>
             {
                 while (_isRunning)
                 {
                     TcpClient tcp = null;
                     SslStream ssl = null;
+                    bool bridgeActive = false;
                     try
                     {
                         string primaryIp = GetPrimaryLocalIp();
                         string pin = string.IsNullOrEmpty(ActivePairingPin) ? "1234" : ActivePairingPin;
                         tcp = new TcpClient();
                         tcp.NoDelay = true;
-                        IAsyncResult ar = tcp.BeginConnect(CLOUD_RELAY_HOST, 443, null, null);
+                        IAsyncResult ar = tcp.BeginConnect(relayHost, 443, null, null);
                         if (!ar.AsyncWaitHandle.WaitOne(4000))
                         {
                             try { tcp.Close(); } catch { }
@@ -1641,7 +1667,7 @@ namespace AirCanvas.Server
                         tcp.EndConnect(ar);
 
                         ssl = new SslStream(tcp.GetStream(), false, (sender, certificate, chain, sslPolicyErrors) => true);
-                        ssl.AuthenticateAsClient(CLOUD_RELAY_HOST, null, (SslProtocols)3072, false);
+                        ssl.AuthenticateAsClient(relayHost, null, (SslProtocols)3072, false);
 
                         string wsKey = Convert.ToBase64String(Guid.NewGuid().ToByteArray());
                         string path = "/ws?pin=" + Uri.EscapeDataString(pin) +
@@ -1650,7 +1676,7 @@ namespace AirCanvas.Server
                                       "&port=" + DEFAULT_PORT;
 
                         string req = "GET " + path + " HTTP/1.1\r\n" +
-                                     "Host: " + CLOUD_RELAY_HOST + "\r\n" +
+                                     "Host: " + relayHost + "\r\n" +
                                      "Upgrade: websocket\r\n" +
                                      "Connection: Upgrade\r\n" +
                                      "Sec-WebSocket-Key: " + wsKey + "\r\n" +
@@ -1685,11 +1711,38 @@ namespace AirCanvas.Server
                             continue;
                         }
 
-                        lock (_cloudLock)
+                        if (isPrimary)
                         {
-                            _cloudRelayStream = ssl;
+                            lock (_cloudLock)
+                            {
+                                _cloudRelayStream = ssl;
+                            }
                         }
                         IsCloudRelayConnected = true;
+                        bridgeActive = true;
+
+                        // Periodic 10s keepalive ping thread so Cloud Run never drops the TLS socket
+                        SslStream activeSsl = ssl;
+                        TcpClient activeTcp = tcp;
+                        Thread keepAliveThread = new Thread(() =>
+                        {
+                            while (_isRunning && bridgeActive && activeTcp != null && activeTcp.Connected)
+                            {
+                                Thread.Sleep(10000);
+                                if (!_isRunning || !bridgeActive) break;
+                                try
+                                {
+                                    long pingTs = DateTime.UtcNow.Ticks / 10000;
+                                    SendMaskedClientWsText(activeSsl, "{\"type\":\"ping\",\"timestamp\":" + pingTs + "}");
+                                }
+                                catch
+                                {
+                                    break;
+                                }
+                            }
+                        });
+                        keepAliveThread.IsBackground = true;
+                        keepAliveThread.Start();
 
                         long joinTime = DateTime.UtcNow.Ticks / 10000;
                         int screenW = Math.Max(64, TargetScreen != null ? TargetScreen.Width : 1920);
@@ -1766,7 +1819,7 @@ namespace AirCanvas.Server
                                         CloudTabletConnected = true;
                                         LastConnectedTabletEndpoint = "Android APK / Auto-Bridge (PIN " + pin + ")";
                                         Console.ForegroundColor = ConsoleColor.Green;
-                                        Console.WriteLine("[CLOUD AUTO-BRIDGE] Android Tablet Paired via PIN " + pin);
+                                        Console.WriteLine("[CLOUD AUTO-BRIDGE] Android Tablet Paired via PIN " + pin + " (" + relayHost + ")");
                                         Console.ResetColor();
                                     }
                                     if (json.Contains("\"connect_request\"") || json.Contains("\"peer_connected\""))
@@ -1787,7 +1840,7 @@ namespace AirCanvas.Server
                                     long nowTs = DateTime.UtcNow.Ticks / 10000;
                                     SendMaskedClientWsText(ssl, "{\"type\":\"pong\",\"timestamp\":" + nowTs + "}");
                                 }
-                                else
+                                else if (!json.Contains("\"pong\""))
                                 {
                                     ProcessJsonPacket(json, null);
                                     BroadcastWsTextMessage(json, null);
@@ -1813,11 +1866,15 @@ namespace AirCanvas.Server
                     catch { }
                     finally
                     {
-                        IsCloudRelayConnected = false;
-                        CloudTabletConnected = false;
-                        lock (_cloudLock)
+                        bridgeActive = false;
+                        if (isPrimary)
                         {
-                            _cloudRelayStream = null;
+                            IsCloudRelayConnected = false;
+                            CloudTabletConnected = false;
+                            lock (_cloudLock)
+                            {
+                                _cloudRelayStream = null;
+                            }
                         }
                         try { if (ssl != null) ssl.Close(); } catch { }
                         try { if (tcp != null) tcp.Close(); } catch { }

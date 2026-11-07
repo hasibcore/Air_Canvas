@@ -312,8 +312,10 @@ export const DrawingStudio: React.FC<DrawingStudioProps> = ({
         const pts = stroke.points;
         if (pts.length === 0) return;
 
-        const getX = (p: (typeof pts)[0]) => (p.normX !== undefined ? p.normX * w : p.x);
-        const getY = (p: (typeof pts)[0]) => (p.normY !== undefined ? p.normY * h : p.y);
+        const spanW = Math.max(1, w - 1);
+        const spanH = Math.max(1, h - 1);
+        const getX = (p: (typeof pts)[0]) => (p.normX !== undefined ? p.normX * spanW : p.x);
+        const getY = (p: (typeof pts)[0]) => (p.normY !== undefined ? p.normY * spanH : p.y);
 
         const isEraser =
           stroke.settings.mode === 'eraser' || pts[0]?.pointerType === 'eraser';
@@ -572,6 +574,28 @@ export const DrawingStudio: React.FC<DrawingStudioProps> = ({
     isDrawingRef.current = true;
     shapeStartRef.current = { x, y };
     currentPtsRef.current = [{ x, y, width: w }];
+
+    if (!['line', 'arrow', 'rect', 'circle'].includes(effectiveTool)) {
+      const spanW = Math.max(1, rect.width - 1);
+      const spanH = Math.max(1, rect.height - 1);
+      const isEraser = effectiveTool === 'eraser';
+      connection.sendInputEvent({
+        x: Math.max(0, Math.min(1, x / spanW)),
+        y: Math.max(0, Math.min(1, y / spanH)),
+        pressure: p,
+        type: 'pointerDown',
+        pointerType: isEraser ? 'eraser' : 'stylus',
+        pointerId: e.pointerId || 1,
+        tiltX: e.tiltX || 0,
+        tiltY: e.tiltY || 0,
+        buttons: isEraser ? 33 : 1,
+        sequenceNumber: 0,
+        timestamp: Date.now(),
+        brushMode: isEraser ? 'eraser' : effectiveTool === 'highlighter' ? 'highlighter' : 'pen',
+        penFlags: isEraser ? 0x06 : 0x00,
+        shortcutKey: isEraser ? 'e' : 'b',
+      });
+    }
   };
 
   const handlePointerMove = (e: React.PointerEvent) => {
@@ -589,6 +613,27 @@ export const DrawingStudio: React.FC<DrawingStudioProps> = ({
       : Math.max(1, activeWidth * (0.45 + p * 0.85));
 
     currentPtsRef.current.push({ x, y, width: w });
+
+    if (!['line', 'arrow', 'rect', 'circle'].includes(activeTool)) {
+      const spanW = Math.max(1, rect.width - 1);
+      const spanH = Math.max(1, rect.height - 1);
+      connection.sendInputEvent({
+        x: Math.max(0, Math.min(1, x / spanW)),
+        y: Math.max(0, Math.min(1, y / spanH)),
+        pressure: p,
+        type: 'pointerMove',
+        pointerType: isEraserNow ? 'eraser' : 'stylus',
+        pointerId: e.pointerId || 1,
+        tiltX: e.tiltX || 0,
+        tiltY: e.tiltY || 0,
+        buttons: isEraserNow ? 33 : 1,
+        sequenceNumber: 0,
+        timestamp: Date.now(),
+        brushMode: isEraserNow ? 'eraser' : activeTool === 'highlighter' ? 'highlighter' : 'pen',
+        penFlags: isEraserNow ? 0x06 : 0x00,
+        shortcutKey: isEraserNow ? 'e' : 'b',
+      });
+    }
   };
 
   const handlePointerUp = () => {
@@ -686,6 +731,26 @@ export const DrawingStudio: React.FC<DrawingStudioProps> = ({
         }
         return updated;
       });
+
+      if (!isShapeTool && strokePoints.length > 0) {
+        const lastPt = strokePoints[strokePoints.length - 1];
+        connection.sendInputEvent({
+          x: lastPt.normX ?? 0.5,
+          y: lastPt.normY ?? 0.5,
+          pressure: 0,
+          type: 'pointerUp',
+          pointerType: isEraserMode ? 'eraser' : 'stylus',
+          pointerId: 1,
+          tiltX: 0,
+          tiltY: 0,
+          buttons: 0,
+          sequenceNumber: 0,
+          timestamp: Date.now(),
+          brushMode: isEraserMode ? 'eraser' : activeTool === 'highlighter' ? 'highlighter' : 'pen',
+          penFlags: 0x00,
+          shortcutKey: isEraserMode ? 'e' : 'b',
+        });
+      }
     }
 
     currentPtsRef.current = [];

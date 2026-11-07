@@ -75,6 +75,7 @@ export class ConnectionManager {
   public connectionStatusMessage = '';
 
   public static readonly CLOUD_RELAY_HOST = 'ais-pre-2wmsbni7lh5hjxll4p27tc-851170313359.asia-northeast1.run.app';
+  public static readonly DEV_RELAY_HOST = 'ais-dev-2wmsbni7lh5hjxll4p27tc-851170313359.asia-northeast1.run.app';
 
   // Broadcast channel for multi-tab zero-lag coordination
   private bc: BroadcastChannel | null = null;
@@ -103,11 +104,27 @@ export class ConnectionManager {
   }
 
   private enqueueOrSend(serialized: string): void {
-    if (!this.isSimulatedOffline && this.ws && this.ws.readyState === WebSocket.OPEN) {
-      try {
-        this.ws.send(serialized);
-        return;
-      } catch {}
+    if (!this.isSimulatedOffline) {
+      let sent = false;
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        try {
+          this.ws.send(serialized);
+          sent = true;
+        } catch {}
+      }
+      if (this.cloudBridgeWs && this.cloudBridgeWs.readyState === WebSocket.OPEN) {
+        try {
+          this.cloudBridgeWs.send(serialized);
+          sent = true;
+        } catch {}
+      }
+      if (this.localServerWs && this.localServerWs.readyState === WebSocket.OPEN) {
+        try {
+          this.localServerWs.send(serialized);
+          sent = true;
+        } catch {}
+      }
+      if (sent) return;
     }
     if (this.outboundQueue.length >= 256) {
       this.outboundQueue.shift();
@@ -475,10 +492,11 @@ export class ConnectionManager {
         console.warn('WebSocket relay error', err);
       }
 
-      // Also bridge to Cloud Relay when running on localhost or local IP so remote HTTPS / APK clients pair by PIN
-      if (!window.location.host.includes(ConnectionManager.CLOUD_RELAY_HOST)) {
-        this.connectCloudHostBridge(this.pairingPin);
-      }
+      // Also bridge to the complementary Cloud Relay host so ais-dev, ais-pre, localhost, and APK clients always pair by PIN
+      const targetBridgeHost = window.location.host.includes(ConnectionManager.CLOUD_RELAY_HOST)
+        ? ConnectionManager.DEV_RELAY_HOST
+        : ConnectionManager.CLOUD_RELAY_HOST;
+      this.connectCloudHostBridge(this.pairingPin, targetBridgeHost);
 
       // Also bridge directly to local AirCanvasServer.exe on ws://127.0.0.1:9090 when running on Vite/Node (port 3000)
       // Note: When running inside AirCanvas.exe (port 3005), this.ws on port 3005 is already handled directly by AirCanvasServer!
@@ -490,7 +508,7 @@ export class ConnectionManager {
     this.notify();
   }
 
-  private connectCloudHostBridge(pin: string): void {
+  private connectCloudHostBridge(pin: string, relayHost = ConnectionManager.CLOUD_RELAY_HOST): void {
     if (typeof window === 'undefined') return;
     try {
       if (this.cloudBridgeWs) {
@@ -501,7 +519,7 @@ export class ConnectionManager {
         this.cloudBridgeWs = null;
       }
       const hostName = encodeURIComponent('AirCanvas-PC-Host');
-      const cloudUrl = `wss://${ConnectionManager.CLOUD_RELAY_HOST}/ws?pin=${encodeURIComponent(pin)}&role=server&name=${hostName}&ip=${encodeURIComponent(this.localIp)}&port=${this.serverPort}`;
+      const cloudUrl = `wss://${relayHost}/ws?pin=${encodeURIComponent(pin)}&role=server&name=${hostName}&ip=${encodeURIComponent(this.localIp)}&port=${this.serverPort}`;
       const cws = new WebSocket(cloudUrl);
       cws.binaryType = 'arraybuffer';
       this.cloudBridgeWs = cws;
@@ -1876,6 +1894,43 @@ export class ConnectionManager {
     };
     this.bc?.postMessage(payload);
     this.enqueueOrSend(JSON.stringify(payload));
+
+    if (
+      !this.isSimulatedOffline &&
+      this.localServerWs &&
+      this.localServerWs.readyState === WebSocket.OPEN &&
+      (event.type === 'pointerDown' ||
+        event.type === 'pointerMove' ||
+        event.type === 'pointerUp' ||
+        event.type === 'hover')
+    ) {
+      const typeCode =
+        event.type === 'pointerDown'
+          ? 0
+          : event.type === 'pointerMove'
+            ? 1
+            : event.type === 'pointerUp'
+              ? 2
+              : 3;
+      const toolByte =
+        event.brushMode === 'eraser' || event.pointerType === 'eraser'
+          ? 1
+          : event.brushMode === 'highlighter'
+            ? 2
+            : 0;
+      const bin = ConnectionManager.encodeBinaryFrame({
+        type: typeCode,
+        normX: event.x,
+        normY: event.y,
+        pressure: event.pressure,
+        tool: toolByte,
+        timestamp: (event.timestamp || Date.now()) >>> 0,
+        version: 1,
+      });
+      try {
+        this.localServerWs.send(bin);
+      } catch {}
+    }
   }
 
   public sendBrushUpdate(brush: Partial<BrushSettings>): void {

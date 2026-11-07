@@ -139,8 +139,11 @@ export const DrawingScreen: React.FC<DrawingScreenProps> = ({
       }
 
       if (typeof window !== 'undefined') {
-        const totalW = effectiveRotationDeg !== 0 ? window.innerHeight : window.innerWidth;
-        const totalH = effectiveRotationDeg !== 0 ? window.innerWidth : window.innerHeight;
+        const isPortraitNow = window.innerHeight > window.innerWidth;
+        const currentRotDeg =
+          rotationMode === 'auto' ? (isPortraitNow ? autoDirection : 0) : rotationMode;
+        const totalW = currentRotDeg !== 0 ? window.innerHeight : window.innerWidth;
+        const totalH = currentRotDeg !== 0 ? window.innerWidth : window.innerHeight;
         setStageSize({
           width: Math.max(120, totalW),
           height: Math.max(120, totalH - measuredTop - measuredBottom),

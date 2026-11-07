@@ -1,7 +1,7 @@
 name: aircanvas
-description: Air Canvas v2.0.6 - Full-Screen Wireless Graphics Tablet & 1:1 PC Software Working Area
+description: Air Canvas v2.0.7 - Full-Screen Wireless Graphics Tablet & 1:1 PC Software Working Area
 publish_to: 'none'
-version: 2.0.6+206
+version: 2.0.7+207
 
 environment:
   sdk: '>=3.0.0 <4.0.0'

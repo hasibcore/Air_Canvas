@@ -132,11 +132,11 @@ function websocketRelay(): Plugin {
               [
                 'commit',
                 '-m',
-                'Release AirCanvas v2.0.6 — 100% Connected Outbound TLS Cloud Auto-Bridge for Windows EXE & Android APK',
+                'Release AirCanvas v2.0.7 — Dual-Relay Cloud Auto-Bridge, 1:1 Ratio/Rotation & Zero-Lag Pen Injection',
               ],
               { shell: false, timeout: 10000 }
             );
-            spawnSync('git', ['tag', '-f', '-a', 'v2.0.6', '-m', 'Air Canvas v2.0.6 Release'], {
+            spawnSync('git', ['tag', '-f', '-a', 'v2.0.7', '-m', 'Air Canvas v2.0.7 Release'], {
               shell: false,
               timeout: 10000,
             });
@@ -145,7 +145,7 @@ function websocketRelay(): Plugin {
               timeout: 25000,
               encoding: 'utf8',
             });
-            const pushTag = spawnSync('git', ['push', remoteUrl, 'refs/tags/v2.0.6:refs/tags/v2.0.6', '--force'], {
+            const pushTag = spawnSync('git', ['push', remoteUrl, 'refs/tags/v2.0.7:refs/tags/v2.0.7', '--force'], {
               shell: false,
               timeout: 25000,
               encoding: 'utf8',
@@ -156,7 +156,7 @@ function websocketRelay(): Plugin {
               res.end(
                 JSON.stringify({
                   ok: true,
-                  message: `Successfully pushed main and tag v2.0.6 to https://github.com/${cleanRepo}! GitHub Actions is now building v2.0.6 AirCanvas.exe, AirCanvasServer.exe, and AirCanvas-release.apk.`,
+                  message: `Successfully pushed main and tag v2.0.7 to https://github.com/${cleanRepo}! GitHub Actions is now building v2.0.7 AirCanvas.exe, AirCanvasServer.exe, and AirCanvas-release.apk.`,
                   output: (pushMain.stdout || '') + '\n' + (pushTag.stdout || ''),
                 })
               );
@@ -182,10 +182,9 @@ function websocketRelay(): Plugin {
 
       server.httpServer.on('upgrade', (req, socket, head) => {
         const url = req.url || '';
-        const secProtocol = req.headers['sec-websocket-protocol'] || '';
-        // Skip Vite's internal HMR socket, upgrade all AirCanvas client/server WebSocket connections
+        const secProtocol = String(req.headers['sec-websocket-protocol'] || '');
         if (secProtocol.includes('vite-hmr')) return;
-        if (url === '/' || url.startsWith('/?') || url.startsWith('/ws') || url.startsWith('/aircanvas')) {
+        if (url.startsWith('/ws') || url.startsWith('/aircanvas')) {
           wss.handleUpgrade(req, socket, head, (ws) => {
             wss.emit('connection', ws, req);
           });

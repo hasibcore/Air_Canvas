@@ -213,8 +213,10 @@ export const DrawingCanvas: React.FC<DrawingCanvasProps> = ({
         const pts = stroke.points;
         if (pts.length === 0) return;
 
-        const getX = (p: (typeof pts)[0]) => (p.normX !== undefined ? p.normX * w : p.x);
-        const getY = (p: (typeof pts)[0]) => (p.normY !== undefined ? p.normY * h : p.y);
+        const spanW = Math.max(1, w - 1);
+        const spanH = Math.max(1, h - 1);
+        const getX = (p: (typeof pts)[0]) => (p.normX !== undefined ? p.normX * spanW : p.x);
+        const getY = (p: (typeof pts)[0]) => (p.normY !== undefined ? p.normY * spanH : p.y);
 
         const isEraser =
           stroke.settings.mode === 'eraser' ||

@@ -1,6 +1,6 @@
 // ==============================================================================
 // AirCanvasDesktop.cs
-// Standalone Windows GUI Desktop Application & Local Asset Server (v2.0.3 PRO)
+// Standalone Windows GUI Desktop Application & Local Asset Server (v2.0.7 PRO)
 // Native Pen Injector + Built-in WinForms Host Window + Embedded HTTP/WS Server
 // ==============================================================================
 
@@ -77,7 +77,7 @@ namespace AirCanvas
             {
                 MessageBox.Show(
                     "Error launching Air Canvas: " + ex.Message,
-                    "Air Canvas v2.0.3",
+                    "Air Canvas v2.0.7",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error
                 );
