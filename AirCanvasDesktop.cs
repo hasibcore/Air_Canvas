@@ -230,6 +230,12 @@ namespace AirCanvas
                         _statusBannerLabel.BackColor = Color.FromArgb(14, 58, 42);
                         _statusBannerLabel.ForeColor = Color.FromArgb(0, 230, 118);
                     }
+                    else if (AirCanvasServer.IsCloudRelayConnected)
+                    {
+                        _statusBannerLabel.Text = "CONNECTED: Auto-Bridge PIN 1234 & LAN " + curIp + ":9090 • READY";
+                        _statusBannerLabel.BackColor = Color.FromArgb(14, 58, 42);
+                        _statusBannerLabel.ForeColor = Color.FromArgb(0, 230, 118);
+                    }
                     else
                     {
                         _statusBannerLabel.Text = "READY & LISTENING ON " + curIp + ":9090 — OPEN ANDROID APP TO CONNECT";

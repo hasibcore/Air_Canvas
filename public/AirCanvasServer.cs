@@ -1,11 +1,12 @@
 // ==============================================================================================
 // AirCanvasServer.cs - High-Performance Windows Native Input Server & Synthetic Pen Injector
-// Version: 2.0.3 PRO
+// Version: 2.0.6 PRO
 // Features:
 // - 100% Mobile Full-Screen Pad -> PC Software Working Area 1:1 Mapping
 // - Auto-Detect Active PC Software Window & Canvas Working Area (Photoshop, Krita, OneNote, etc.)
 // - Zero Unwanted Straight-Line Protection (Hover-before-Down & Unclosed Stroke Recovery)
 // - Per-Monitor V2 DPI Invariance (100%, 125%, 150%, 175%, 200%)
+// - Outbound TLS 1.2 Cloud Relay Auto-Bridge (Zero-Firewall Pairing for Android APK & Web Pad)
 // ==============================================================================================
 
 using System;
@@ -14,8 +15,10 @@ using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Net;
+using System.Net.Security;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
+using System.Security.Authentication;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
@@ -119,9 +122,10 @@ namespace AirCanvas.Server
 
     public class AirCanvasServer
     {
-        public const string VERSION = "2.0.3 PRO";
+        public const string VERSION = "2.0.6 PRO";
         public const int DEFAULT_PORT = 9090;
         public const int DISCOVERY_PORT = 9091;
+        public const string CLOUD_RELAY_HOST = "ais-pre-2wmsbni7lh5hjxll4p27tc-851170313359.asia-northeast1.run.app";
 
         // Monitor & DPI state
         public static ScreenBounds TargetScreen;
@@ -1442,10 +1446,16 @@ namespace AirCanvas.Server
 
         private static bool _isRunning = true;
         private static bool _backgroundStarted = false;
+        private static bool _cloudBridgeStarted = false;
         private static TcpListener _tcpListener = null;
         private static UdpClient _udpListener = null;
         public static bool IsWebSocketListening = false;
         public static bool IsUdpListening = false;
+        public static bool IsCloudRelayConnected = false;
+        public static bool CloudTabletConnected = false;
+        public static string ActivePairingPin = "1234";
+        private static Stream _cloudRelayStream = null;
+        private static readonly object _cloudLock = new object();
         public static readonly List<NetworkStream> _activeClients = new List<NetworkStream>();
         public static readonly List<NetworkStream> _remoteTabletStreams = new List<NetworkStream>();
         public static string LastConnectedTabletEndpoint = "";
@@ -1456,7 +1466,9 @@ namespace AirCanvas.Server
         {
             lock (_clientsLock)
             {
-                return _remoteTabletStreams.Count;
+                int count = _remoteTabletStreams.Count;
+                if (CloudTabletConnected) count++;
+                return count;
             }
         }
 
@@ -1596,8 +1608,277 @@ namespace AirCanvas.Server
             adbThread.Start();
         }
 
+        public static void StartCloudRelayBridge()
+        {
+            if (_cloudBridgeStarted) return;
+            _cloudBridgeStarted = true;
+
+            try
+            {
+                ServicePointManager.SecurityProtocol |= (SecurityProtocolType)3072; // TLS 1.2
+            }
+            catch { }
+
+            Thread cloudThread = new Thread(() =>
+            {
+                while (_isRunning)
+                {
+                    TcpClient tcp = null;
+                    SslStream ssl = null;
+                    try
+                    {
+                        string primaryIp = GetPrimaryLocalIp();
+                        string pin = string.IsNullOrEmpty(ActivePairingPin) ? "1234" : ActivePairingPin;
+                        tcp = new TcpClient();
+                        tcp.NoDelay = true;
+                        IAsyncResult ar = tcp.BeginConnect(CLOUD_RELAY_HOST, 443, null, null);
+                        if (!ar.AsyncWaitHandle.WaitOne(4000))
+                        {
+                            try { tcp.Close(); } catch { }
+                            Thread.Sleep(2500);
+                            continue;
+                        }
+                        tcp.EndConnect(ar);
+
+                        ssl = new SslStream(tcp.GetStream(), false, (sender, certificate, chain, sslPolicyErrors) => true);
+                        ssl.AuthenticateAsClient(CLOUD_RELAY_HOST, null, (SslProtocols)3072, false);
+
+                        string wsKey = Convert.ToBase64String(Guid.NewGuid().ToByteArray());
+                        string path = "/ws?pin=" + Uri.EscapeDataString(pin) +
+                                      "&role=server&name=" + Uri.EscapeDataString(Environment.MachineName + "-PC") +
+                                      "&ip=" + Uri.EscapeDataString(primaryIp) +
+                                      "&port=" + DEFAULT_PORT;
+
+                        string req = "GET " + path + " HTTP/1.1\r\n" +
+                                     "Host: " + CLOUD_RELAY_HOST + "\r\n" +
+                                     "Upgrade: websocket\r\n" +
+                                     "Connection: Upgrade\r\n" +
+                                     "Sec-WebSocket-Key: " + wsKey + "\r\n" +
+                                     "Sec-WebSocket-Version: 13\r\n\r\n";
+
+                        byte[] reqBytes = Encoding.UTF8.GetBytes(req);
+                        ssl.Write(reqBytes, 0, reqBytes.Length);
+                        ssl.Flush();
+
+                        // Read HTTP 101 Switching Protocols header byte-by-byte until \r\n\r\n
+                        StringBuilder headerSb = new StringBuilder();
+                        int prev3 = 0, prev2 = 0, prev1 = 0, cur = 0;
+                        while ((cur = ssl.ReadByte()) != -1)
+                        {
+                            headerSb.Append((char)cur);
+                            if (prev3 == '\r' && prev2 == '\n' && prev1 == '\r' && cur == '\n')
+                            {
+                                break;
+                            }
+                            prev3 = prev2;
+                            prev2 = prev1;
+                            prev1 = cur;
+                            if (headerSb.Length > 8192) break;
+                        }
+
+                        string headerResp = headerSb.ToString();
+                        if (!headerResp.Contains("101"))
+                        {
+                            try { ssl.Close(); } catch { }
+                            try { tcp.Close(); } catch { }
+                            Thread.Sleep(3000);
+                            continue;
+                        }
+
+                        lock (_cloudLock)
+                        {
+                            _cloudRelayStream = ssl;
+                        }
+                        IsCloudRelayConnected = true;
+
+                        long joinTime = DateTime.UtcNow.Ticks / 10000;
+                        int screenW = Math.Max(64, TargetScreen != null ? TargetScreen.Width : 1920);
+                        int screenH = Math.Max(64, TargetScreen != null ? TargetScreen.Height : 1080);
+                        ScreenBounds resolvedWork = ResolveSoftwareWorkingBounds(TargetScreen);
+
+                        SendMaskedClientWsText(ssl, "{\"type\":\"register_host\",\"pin\":\"" + pin + "\",\"name\":\"" + Environment.MachineName + "\",\"ip\":\"" + primaryIp + "\",\"port\":" + DEFAULT_PORT + "}");
+                        SendMaskedClientWsText(ssl, "{\"type\":\"screen_sync\",\"screenWidth\":" + screenW + ",\"screenHeight\":" + screenH + ",\"timestamp\":" + joinTime + "}");
+                        SendMaskedClientWsText(ssl, "{\"type\":\"workingAreaDetected\",\"workLeft\":" + resolvedWork.Left + ",\"workTop\":" + resolvedWork.Top + ",\"workWidth\":" + Math.Max(64, resolvedWork.Width) + ",\"workHeight\":" + Math.Max(64, resolvedWork.Height) + ",\"screenWidth\":" + screenW + ",\"screenHeight\":" + screenH + ",\"appName\":\"" + (ActiveWorkArea.PresetId ?? "auto") + "\",\"targetMode\":\"CANVAS\",\"targetAvailable\":true,\"canvasVerified\":true,\"requiresCalibration\":false}");
+
+                        while (_isRunning && tcp.Connected)
+                        {
+                            int b0 = ssl.ReadByte();
+                            if (b0 == -1) break;
+
+                            int opcode = b0 & 0x0F;
+                            if (opcode == 0x8) break;
+
+                            int b1 = ssl.ReadByte();
+                            if (b1 == -1) break;
+
+                            bool masked = (b1 & 0x80) != 0;
+                            long payloadLength = b1 & 0x7F;
+
+                            if (payloadLength == 126)
+                            {
+                                int l0 = ssl.ReadByte();
+                                int l1 = ssl.ReadByte();
+                                payloadLength = (l0 << 8) | l1;
+                            }
+                            else if (payloadLength == 127)
+                            {
+                                byte[] lenBytes = new byte[8];
+                                ReadExactStream(ssl, lenBytes, 8);
+                                Array.Reverse(lenBytes);
+                                payloadLength = BitConverter.ToInt64(lenBytes, 0);
+                            }
+
+                            byte[] maskKey = new byte[4];
+                            if (masked)
+                            {
+                                ReadExactStream(ssl, maskKey, 4);
+                            }
+
+                            if (payloadLength < 0 || payloadLength > 65536) break;
+                            byte[] payload = new byte[(int)payloadLength];
+                            if (payloadLength > 0)
+                            {
+                                ReadExactStream(ssl, payload, (int)payloadLength);
+                            }
+
+                            if (masked)
+                            {
+                                for (int i = 0; i < payload.Length; i++)
+                                {
+                                    payload[i] ^= maskKey[i % 4];
+                                }
+                            }
+
+                            if (opcode == 0x1)
+                            {
+                                TotalPacketsReceived++;
+                                string json = Encoding.UTF8.GetString(payload);
+                                if (json.Contains("\"peer_connected\"") ||
+                                    json.Contains("\"connect_request\"") ||
+                                    json.Contains("\"pointerDown\"") ||
+                                    json.Contains("\"pointerMove\"") ||
+                                    json.Contains("\"input_event\"") ||
+                                    json.Contains("\"workArea\"") ||
+                                    (json.Contains("\"room_joined\"") && !json.Contains("\"peerCount\":1,")))
+                                {
+                                    if (!CloudTabletConnected)
+                                    {
+                                        CloudTabletConnected = true;
+                                        LastConnectedTabletEndpoint = "Android APK / Auto-Bridge (PIN " + pin + ")";
+                                        Console.ForegroundColor = ConsoleColor.Green;
+                                        Console.WriteLine("[CLOUD AUTO-BRIDGE] Android Tablet Paired via PIN " + pin);
+                                        Console.ResetColor();
+                                    }
+                                    if (json.Contains("\"connect_request\"") || json.Contains("\"peer_connected\""))
+                                    {
+                                        long nowTs = DateTime.UtcNow.Ticks / 10000;
+                                        SendMaskedClientWsText(ssl, "{\"type\":\"connect_accept\",\"senderMode\":\"server\",\"pin\":\"" + pin + "\",\"timestamp\":" + nowTs + "}");
+                                        SendMaskedClientWsText(ssl, "{\"type\":\"screen_sync\",\"screenWidth\":" + screenW + ",\"screenHeight\":" + screenH + ",\"timestamp\":" + nowTs + "}");
+                                    }
+                                }
+                                else if (json.Contains("\"peer_disconnected\"") && json.Contains("\"peerCount\":1"))
+                                {
+                                    CloudTabletConnected = false;
+                                    ReleaseStuckPointerOnDisconnect();
+                                }
+
+                                if (json.Contains("\"ping\""))
+                                {
+                                    long nowTs = DateTime.UtcNow.Ticks / 10000;
+                                    SendMaskedClientWsText(ssl, "{\"type\":\"pong\",\"timestamp\":" + nowTs + "}");
+                                }
+                                else
+                                {
+                                    ProcessJsonPacket(json, null);
+                                    BroadcastWsTextMessage(json, null);
+                                }
+                            }
+                            else if (opcode == 0x2)
+                            {
+                                TotalPacketsReceived++;
+                                if (!CloudTabletConnected)
+                                {
+                                    CloudTabletConnected = true;
+                                    LastConnectedTabletEndpoint = "Android APK / Auto-Bridge (PIN " + pin + ")";
+                                }
+                                ProcessBinaryPacket(payload, payload.Length, null, null);
+                                BroadcastWsBinary(payload, null);
+                            }
+                            else if (opcode == 0x9)
+                            {
+                                SendMaskedClientWsControl(ssl, 0x8A, payload);
+                            }
+                        }
+                    }
+                    catch { }
+                    finally
+                    {
+                        IsCloudRelayConnected = false;
+                        CloudTabletConnected = false;
+                        lock (_cloudLock)
+                        {
+                            _cloudRelayStream = null;
+                        }
+                        try { if (ssl != null) ssl.Close(); } catch { }
+                        try { if (tcp != null) tcp.Close(); } catch { }
+                    }
+
+                    Thread.Sleep(2500);
+                }
+            });
+            cloudThread.IsBackground = true;
+            cloudThread.Start();
+        }
+
+        private static void SendMaskedClientWsText(Stream stream, string text)
+        {
+            if (stream == null || string.IsNullOrEmpty(text)) return;
+            try
+            {
+                byte[] raw = Encoding.UTF8.GetBytes(text);
+                SendMaskedClientWsControl(stream, 0x81, raw);
+            }
+            catch { }
+        }
+
+        private static void SendMaskedClientWsControl(Stream stream, byte firstByte, byte[] payload)
+        {
+            if (stream == null) return;
+            try
+            {
+                byte[] data = payload ?? new byte[0];
+                byte[] mask = new byte[] { 0x37, 0xFA, 0x21, 0x3D };
+                int headerLen = data.Length <= 125 ? 6 : 8;
+                byte[] frame = new byte[headerLen + data.Length];
+                frame[0] = firstByte;
+                if (data.Length <= 125)
+                {
+                    frame[1] = (byte)(0x80 | data.Length);
+                    Buffer.BlockCopy(mask, 0, frame, 2, 4);
+                }
+                else
+                {
+                    frame[1] = (byte)(0x80 | 126);
+                    frame[2] = (byte)((data.Length >> 8) & 0xFF);
+                    frame[3] = (byte)(data.Length & 0xFF);
+                    Buffer.BlockCopy(mask, 0, frame, 4, 4);
+                }
+                for (int i = 0; i < data.Length; i++)
+                {
+                    frame[headerLen + i] = (byte)(data[i] ^ mask[i % 4]);
+                }
+                lock (_cloudLock)
+                {
+                    stream.Write(frame, 0, frame.Length);
+                    stream.Flush();
+                }
+            }
+            catch { }
+        }
+
         public static void StartWebSocketServer()
         {
+            StartCloudRelayBridge();
             try
             {
                 EnsureFirewallRules();
@@ -1984,6 +2265,11 @@ namespace AirCanvas.Server
         }
 
         private static void ReadExact(NetworkStream stream, byte[] buffer, int count)
+        {
+            ReadExactStream(stream, buffer, count);
+        }
+
+        private static void ReadExactStream(Stream stream, byte[] buffer, int count)
         {
             int offset = 0;
             while (offset < count)

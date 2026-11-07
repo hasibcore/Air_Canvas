@@ -1,4 +1,4 @@
-name: Build and Release AirCanvas v2.0.5
+name: Build and Release AirCanvas v2.0.6
 
 on:
   push:
@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   build-windows:
-    name: Build Windows v2.0.5 Release (.exe + Web Studio)
+    name: Build Windows v2.0.6 Release (.exe + Web Studio)
     runs-on: windows-latest
     steps:
       - name: Checkout repository
@@ -24,7 +24,7 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Build & Verify v2.0.5 Web Studio, Phase 4.10 Target Mapping & V4 Suites
+      - name: Build & Verify v2.0.6 Web Studio, Phase 4.10 Target Mapping & V4 Suites
         run: |
           npm install
           npm run lint
@@ -32,13 +32,13 @@ jobs:
           node test_live_dual_device.js
           npm run build
 
-      - name: Compile Native Windows Desktop & Server Executables (v2.0.5)
+      - name: Compile Native Windows Desktop & Server Executables (v2.0.6)
         shell: cmd
         run: |
           C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe /target:winexe /win32manifest:app.manifest /win32icon:app.ico /out:AirCanvas.exe /main:AirCanvas.Program /optimize+ /r:System.Drawing.dll /r:System.Windows.Forms.dll /r:System.dll AirCanvasServer.cs AirCanvasDesktop.cs
           C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe /target:exe /win32manifest:app.manifest /win32icon:app.ico /out:AirCanvasServer.exe /main:AirCanvas.Server.AirCanvasServer /optimize+ /r:System.Drawing.dll /r:System.Windows.Forms.dll /r:System.dll AirCanvasServer.cs
 
-      - name: Compress Windows v2.0.5 Release Bundle
+      - name: Compress Windows v2.0.6 Release Bundle
         shell: pwsh
         run: |
           Compress-Archive -Path AirCanvas.exe, AirCanvasServer.exe, dist, Fix_Firewall.bat, Start_AirCanvas_USB.bat, app.ico, PROJECT_AUDIT.md, AUDIT_CHECKPOINT.md -DestinationPath AirCanvas-Windows-x64.zip -Force
@@ -56,7 +56,7 @@ jobs:
 
 
   build-android:
-    name: Build Android v2.0.5 APK (.apk)
+    name: Build Android v2.0.6 APK (.apk)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -114,8 +114,8 @@ jobs:
       - name: Install dependencies
         run: flutter pub get
 
-      - name: Build Android Release APK (v2.0.5)
-        run: flutter build apk --release --build-name=2.0.5 --build-number=205
+      - name: Build Android Release APK (v2.0.6)
+        run: flutter build apk --release --build-name=2.0.6 --build-number=206
 
       - name: Align and Sign APK with v1, v2, and v3 Signature Schemes
         run: |
@@ -159,7 +159,7 @@ jobs:
           path: AirCanvas-release.apk
 
   release:
-    name: Create GitHub Release (v2.0.5)
+    name: Create GitHub Release (v2.0.6)
     needs: [build-windows, build-android]
     if: always() && (needs.build-windows.result == 'success' || needs.build-android.result == 'success')
     runs-on: ubuntu-latest
@@ -177,8 +177,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          tag_name: ${{ (github.ref_type == 'tag' && github.ref_name) || 'v2.0.5' }}
-          name: AirCanvas ${{ (github.ref_type == 'tag' && github.ref_name) || 'v2.0.5' }} - 100% Bug-Free Tri-Transport Auto-Bridge, 1:1 Ratio/Rotation & Offline Queue
+          tag_name: ${{ (github.ref_type == 'tag' && github.ref_name) || 'v2.0.6' }}
+          name: AirCanvas ${{ (github.ref_type == 'tag' && github.ref_name) || 'v2.0.6' }} - 100% Connected Outbound TLS Auto-Bridge, 1:1 Ratio/Rotation & Offline Queue
           files: |
             release-assets/*
           draft: false

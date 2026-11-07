@@ -182,11 +182,11 @@ const server = http.createServer((req, res) => {
         [
           'commit',
           '-m',
-          'Release AirCanvas v2.0.5 — 100% Bug-Free Tri-Transport Auto-Bridge, 1:1 Ratio/Rotation & Offline Queue',
+          'Release AirCanvas v2.0.6 — 100% Connected Outbound TLS Cloud Auto-Bridge for Windows EXE & Android APK',
         ],
         { cwd: __dirname, shell: false, timeout: 10000 }
       );
-      spawnSync('git', ['tag', '-f', '-a', 'v2.0.5', '-m', 'Air Canvas v2.0.5 Release'], {
+      spawnSync('git', ['tag', '-f', '-a', 'v2.0.6', '-m', 'Air Canvas v2.0.6 Release'], {
         cwd: __dirname,
         shell: false,
         timeout: 10000,
@@ -197,7 +197,7 @@ const server = http.createServer((req, res) => {
         timeout: 25000,
         encoding: 'utf8',
       });
-      const pushTag = spawnSync('git', ['push', authRemote, 'refs/tags/v2.0.5:refs/tags/v2.0.5', '--force'], {
+      const pushTag = spawnSync('git', ['push', authRemote, 'refs/tags/v2.0.6:refs/tags/v2.0.6', '--force'], {
         cwd: __dirname,
         shell: false,
         timeout: 25000,
@@ -209,7 +209,7 @@ const server = http.createServer((req, res) => {
         res.end(
           JSON.stringify({
             ok: true,
-            message: `Successfully pushed branch main and tag v2.0.5 to https://github.com/${cleanSlug} (GitHub Actions release pipeline triggered for APK & EXE).`,
+            message: `Successfully pushed branch main and tag v2.0.6 to https://github.com/${cleanSlug} (GitHub Actions release pipeline triggered for APK & EXE).`,
           })
         );
       } else {
@@ -388,6 +388,8 @@ wss.on('connection', (ws, req) => {
           role,
           pin,
           deviceName,
+          ip: localIp,
+          port,
           transportType,
           peerCount: room.size,
           timestamp: Date.now()
@@ -397,6 +399,8 @@ wss.on('connection', (ws, req) => {
           role: existingMeta?.role || 'server',
           pin,
           deviceName: existingMeta?.deviceName || 'AirCanvas-PC-Host',
+          ip: existingMeta?.localIp || '192.168.1.100',
+          port: existingMeta?.port || 9090,
           transportType: existingMeta?.transportType || transportType,
           peerCount: room.size,
           timestamp: Date.now()

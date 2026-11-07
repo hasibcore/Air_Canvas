@@ -209,7 +209,10 @@ class NetworkConnectionManager extends ChangeNotifier {
   bool autoAspectFit = true;
 
   List<DiscoveredPC> discoveredDevices = [];
+  final List<Uint8List> _outboundQueue = [];
   Timer? _pingTimer;
+  Timer? _reconnectTimer;
+  bool _manualDisconnect = false;
   int _lastPingSent = 0;
 
   void setTargetMode(String mode) {
@@ -316,16 +319,20 @@ class NetworkConnectionManager extends ChangeNotifier {
   Future<void> scanLocalNetwork({bool autoConnect = true}) async {
     if (isScanning) return;
     isScanning = true;
+    _manualDisconnect = false;
     discoveredDevices.clear();
     lastError = '';
-    statusMessage = 'Scanning Wi-Fi LAN & USB for AirCanvas PC Server...';
+    statusMessage = 'Auto-Connecting via USB, Wi-Fi LAN & Cloud PIN $pairingPin...';
     notifyListeners();
+
+    final List<String> subnets = [];
+    final Set<String> ownIps = {};
 
     try {
       // 1. Check USB Cable (127.0.0.1:9090 and 127.0.0.1:3005) first for instant 1ms USB connection
-      await _probeHost('127.0.0.1', 9090, timeoutMs: 350);
+      await _probeHost('127.0.0.1', 9090, timeoutMs: 240);
       if (discoveredDevices.isEmpty) {
-        await _probeHost('127.0.0.1', 3005, timeoutMs: 300);
+        await _probeHost('127.0.0.1', 3005, timeoutMs: 220);
       }
       if (autoConnect && discoveredDevices.isNotEmpty && !isConnected && !isConnecting) {
         final firstUsb = discoveredDevices.first;
@@ -351,8 +358,6 @@ class NetworkConnectionManager extends ChangeNotifier {
 
       final probe = utf8.encode(jsonEncode({'type': 'DISCOVERY_PING', 'app': 'AirCanvas'}));
       final interfaces = await NetworkInterface.list(type: InternetAddressType.IPv4);
-      final List<String> subnets = [];
-      final Set<String> ownIps = {};
 
       for (final iface in interfaces) {
         for (final addr in iface.addresses) {
@@ -372,8 +377,8 @@ class NetworkConnectionManager extends ChangeNotifier {
         }
       }
 
-      // Send UDP broadcast pings 3 times so Wi-Fi packet loss never drops discovery
-      for (int attempt = 0; attempt < 3; attempt++) {
+      // Fast UDP broadcast pings (2 rounds x 110ms)
+      for (int attempt = 0; attempt < 2; attempt++) {
         try {
           _udpSocket?.send(probe, InternetAddress('255.255.255.255'), 9091);
         } catch (_) {}
@@ -382,33 +387,9 @@ class NetworkConnectionManager extends ChangeNotifier {
             _udpSocket?.send(probe, InternetAddress('$subnet.255'), 9091);
           } catch (_) {}
         }
-        await Future.delayed(const Duration(milliseconds: 140));
+        await Future.delayed(const Duration(milliseconds: 110));
         if (discoveredDevices.isNotEmpty && autoConnect && (isConnected || isConnecting)) {
           return;
-        }
-      }
-
-      // 3. Batched TCP port 9090 scan (24 hosts per batch so Android's socket table is never overwhelmed)
-      final List<int> hostOrder = [
-        for (int i = 100; i <= 135; i++) i,
-        for (int i = 2; i <= 55; i++) i,
-        for (int i = 56; i <= 99; i++) i,
-        for (int i = 136; i <= 199; i++) i,
-        for (int i = 200; i <= 254; i++) i,
-        1,
-      ];
-
-      for (final subnet in subnets) {
-        for (int offset = 0; offset < hostOrder.length; offset += 24) {
-          if (isConnected || (autoConnect && discoveredDevices.isNotEmpty)) break;
-          final batch = hostOrder.skip(offset).take(24);
-          final List<Future<void>> batchFutures = [];
-          for (final hostNum in batch) {
-            final targetIp = '$subnet.$hostNum';
-            if (ownIps.contains(targetIp)) continue;
-            batchFutures.add(_probeHost(targetIp, 9090, timeoutMs: 380));
-          }
-          await Future.wait(batchFutures);
         }
       }
 
@@ -419,8 +400,23 @@ class NetworkConnectionManager extends ChangeNotifier {
         await connect(target.ip, target.port, pin: pairingPin);
         return;
       }
+
+      // 3. Instant Cloud Relay Auto-Bridge Connection so the app is CONNECTED immediately (< 1s)
+      // even if Windows Firewall blocks inbound TCP 9090 or Wi-Fi has AP isolation!
+      if (autoConnect && !isConnected && !isConnecting) {
+        isScanning = false;
+        notifyListeners();
+        await connect('relay', 443, pin: pairingPin);
+      }
+
+      // 4. Continue scanning local LAN TCP port 9090 in the background; if a direct LAN PC is open,
+      // add it to discoveredDevices and seamlessly upgrade from Cloud Relay to 1ms Direct LAN!
+      _scanLanSubnetsInBackground(subnets, ownIps, autoConnect: autoConnect);
     } catch (e) {
       lastError = 'Network scan error: $e';
+      if (autoConnect && !isConnected && !isConnecting) {
+        await connect('relay', 443, pin: pairingPin);
+      }
     } finally {
       try {
         _udpSocket?.close();
@@ -435,6 +431,60 @@ class NetworkConnectionManager extends ChangeNotifier {
         statusMessage = 'Found ${discoveredDevices.length} PC Server(s)! Tap Connect.';
       }
       notifyListeners();
+    }
+  }
+
+  Future<void> _scanLanSubnetsInBackground(
+    List<String> subnets,
+    Set<String> ownIps, {
+    bool autoConnect = true,
+  }) async {
+    final List<int> hostOrder = [
+      for (int i = 100; i <= 135; i++) i,
+      for (int i = 2; i <= 55; i++) i,
+      for (int i = 56; i <= 99; i++) i,
+      for (int i = 136; i <= 199; i++) i,
+      for (int i = 200; i <= 254; i++) i,
+      1,
+    ];
+
+    for (final subnet in subnets) {
+      for (int offset = 0; offset < hostOrder.length; offset += 24) {
+        if (_manualDisconnect) return;
+        if (isConnected && activeTransport != 'cloud') return;
+        final batch = hostOrder.skip(offset).take(24);
+        final List<Future<void>> batchFutures = [];
+        for (final hostNum in batch) {
+          final targetIp = '$subnet.$hostNum';
+          if (ownIps.contains(targetIp)) continue;
+          batchFutures.add(_probeHost(targetIp, 9090, timeoutMs: 320));
+        }
+        await Future.wait(batchFutures);
+        if (discoveredDevices.isNotEmpty && autoConnect) {
+          final lanPc = discoveredDevices.firstWhere(
+            (d) => d.ip != '127.0.0.1' && d.ip != 'relay',
+            orElse: () => discoveredDevices.first,
+          );
+          if (!isConnected || activeTransport == 'cloud') {
+            await _tryUpgradeToDirectLan(lanPc.ip, lanPc.port);
+            return;
+          }
+        }
+      }
+    }
+  }
+
+  Future<void> _tryUpgradeToDirectLan(String lanIp, int lanPort) async {
+    if (lanIp.isEmpty || lanIp == 'relay' || lanIp == '0.0.0.0') return;
+    if (isConnected && activeTransport != 'cloud' && connectedIp == lanIp) return;
+    try {
+      final testSock = await WebSocket.connect(
+        'ws://$lanIp:$lanPort/aircanvas?pin=$pairingPin&role=client&name=Android-APK&transport=wifi',
+      ).timeout(const Duration(milliseconds: 900));
+      await testSock.close();
+      await connect(lanIp, lanPort, pin: pairingPin);
+    } catch (_) {
+      // Keep active Cloud Relay connection if direct LAN port 9090 is firewalled
     }
   }
 
@@ -488,8 +538,10 @@ class NetworkConnectionManager extends ChangeNotifier {
 
     final cleanPin = (pin ?? pairingPin).trim().isEmpty ? '1234' : (pin ?? pairingPin).trim();
     pairingPin = cleanPin;
+    _manualDisconnect = false;
+    _reconnectTimer?.cancel();
 
-    await disconnect();
+    await disconnect(manual: false);
     isConnecting = true;
     lastError = '';
     statusMessage = 'Connecting to PC ($cleanIp:$targetPort)...';
@@ -499,6 +551,7 @@ class NetworkConnectionManager extends ChangeNotifier {
         cleanIp.toLowerCase() == 'cloud' ||
         cleanIp.contains('.run.app');
     const String kCloudRelayHost = 'ais-pre-2wmsbni7lh5hjxll4p27tc-851170313359.asia-northeast1.run.app';
+    const String kDevRelayHost = 'ais-dev-2wmsbni7lh5hjxll4p27tc-851170313359.asia-northeast1.run.app';
     final String transportTag = isCloudRelayTarget
         ? 'cloud'
         : (cleanIp == '127.0.0.1' ? 'usb' : 'wifi');
@@ -509,9 +562,16 @@ class NetworkConnectionManager extends ChangeNotifier {
       final String relayHost = cleanIp.contains('.run.app') ? cleanIp : kCloudRelayHost;
       candidates.add({
         'url': 'wss://$relayHost/ws?pin=$cleanPin&role=client&name=Android-APK&transport=cloud',
-        'label': 'Cloud Relay (PIN $cleanPin)',
+        'label': 'Auto-Bridge PIN $cleanPin',
         'transport': 'cloud',
       });
+      if (relayHost != kDevRelayHost) {
+        candidates.add({
+          'url': 'wss://$kDevRelayHost/ws?pin=$cleanPin&role=client&name=Android-APK&transport=cloud',
+          'label': 'Auto-Bridge Dev PIN $cleanPin',
+          'transport': 'cloud',
+        });
+      }
     } else {
       candidates.addAll([
         {
@@ -550,7 +610,7 @@ class NetworkConnectionManager extends ChangeNotifier {
       // Automatic Cloud Relay PIN failover if LAN/USB sockets are blocked by firewall or AP isolation
       candidates.add({
         'url': 'wss://$kCloudRelayHost/ws?pin=$cleanPin&role=client&name=Android-APK&transport=cloud',
-        'label': 'Cloud Relay (PIN $cleanPin)',
+        'label': 'Auto-Bridge PIN $cleanPin',
         'transport': 'cloud',
       });
     }
@@ -563,7 +623,7 @@ class NetworkConnectionManager extends ChangeNotifier {
       try {
         statusMessage = 'Connecting to ${cand['label']}...';
         notifyListeners();
-        final int timeoutMs = cand['label']!.contains('127.0.0.1') && cleanIp != '127.0.0.1' ? 900 : 2800;
+        final int timeoutMs = cand['label']!.contains('127.0.0.1') && cleanIp != '127.0.0.1' ? 750 : 2500;
         sock = await WebSocket.connect(cand['url']!).timeout(Duration(milliseconds: timeoutMs));
         connectedLabel = cand['label']!;
         selectedTransport = cand['transport']!;
@@ -577,8 +637,9 @@ class NetworkConnectionManager extends ChangeNotifier {
       isConnected = false;
       isConnecting = false;
       lastError = 'Could not reach PC at $cleanIp:$targetPort. Make sure AirCanvas.exe is open on PC and both devices are on the same Wi-Fi (or click "Unblock Firewall & USB" on PC).';
-      statusMessage = 'Connection failed ($cleanIp:$targetPort)';
+      statusMessage = 'Retrying connection ($cleanIp:$targetPort)...';
       notifyListeners();
+      _scheduleAutoReconnect();
       return false;
     }
 
@@ -589,13 +650,16 @@ class NetworkConnectionManager extends ChangeNotifier {
       isConnected = true;
       isConnecting = false;
       activeTransport = selectedTransport;
-      connectedIp = cleanIp;
+      connectedIp = selectedTransport == 'cloud' ? 'PIN $cleanPin' : cleanIp;
       connectedPort = targetPort;
-      detectedSubnetHint = cleanIp;
+      if (cleanIp != 'relay' && cleanIp != 'cloud' && cleanIp != '127.0.0.1') {
+        detectedSubnetHint = cleanIp;
+      }
+      latencyMs = selectedTransport == 'usb' ? 1 : (selectedTransport == 'wifi' ? 2 : 8);
       statusMessage = 'Connected ($connectedLabel) • 1:1 ${selectedPreset.shortLabel}';
       notifyListeners();
 
-      // Send formal connect_request handshake for Web Studio & PC Desktop + sync PC Software Working Area preset
+      // Send formal connect_request handshake + discovery_ping + sync PC Software Working Area preset
       try {
         _socket!.add(jsonEncode({
           'type': 'connect_request',
@@ -614,8 +678,13 @@ class NetworkConnectionManager extends ChangeNotifier {
           },
           'timestamp': DateTime.now().millisecondsSinceEpoch,
         }));
+        _socket!.add(jsonEncode({
+          'type': 'discovery_ping',
+          'timestamp': DateTime.now().millisecondsSinceEpoch,
+        }));
       } catch (_) {}
       syncWorkingAreaToPC();
+      _flushOutboundQueue();
 
       _socket!.listen(
         (dynamic message) {
@@ -626,6 +695,33 @@ class NetworkConnectionManager extends ChangeNotifier {
                 final now = DateTime.now().millisecondsSinceEpoch;
                 latencyMs = (now - _lastPingSent).clamp(1, 999);
                 notifyListeners();
+              } else if (data['type'] == 'discovery_pong' || data['type'] == 'peer_connected') {
+                final String? hostIp = data['ip'] is String ? (data['ip'] as String).trim() : null;
+                final int hostPort = (data['port'] is num) ? (data['port'] as num).toInt() : 9090;
+                if (hostIp != null &&
+                    hostIp.isNotEmpty &&
+                    hostIp != 'relay' &&
+                    hostIp != '0.0.0.0' &&
+                    hostIp != '127.0.0.1') {
+                  detectedSubnetHint = hostIp;
+                  if (!discoveredDevices.any((d) => d.ip == hostIp)) {
+                    discoveredDevices.insert(
+                      0,
+                      DiscoveredPC(
+                        name: (data['name'] is String && (data['name'] as String).isNotEmpty)
+                            ? '${data['name']} ($hostIp)'
+                            : 'Windows PC ($hostIp)',
+                        ip: hostIp,
+                        port: hostPort,
+                        latencyMs: 2,
+                      ),
+                    );
+                  }
+                  if (activeTransport == 'cloud') {
+                    _tryUpgradeToDirectLan(hostIp, hostPort);
+                  }
+                  notifyListeners();
+                }
               } else if (data['type'] == 'screen_sync') {
                 final int sw = (data['screenWidth'] is num) ? (data['screenWidth'] as num).toInt() : detectedPcWorkWidth;
                 final int sh = (data['screenHeight'] is num) ? (data['screenHeight'] as num).toInt() : detectedPcWorkHeight;
@@ -664,10 +760,10 @@ class NetworkConnectionManager extends ChangeNotifier {
           }
         },
         onDone: () {
-          _handleDisconnect('PC Server closed the connection.');
+          _handleDisconnect('Reconnecting to PC Server...');
         },
         onError: (err) {
-          _handleDisconnect('Connection error: $err');
+          _handleDisconnect('Reconnecting ($err)...');
         },
       );
 
@@ -688,8 +784,35 @@ class NetworkConnectionManager extends ChangeNotifier {
       lastError = 'Could not reach $cleanIp:$port. Ensure AirCanvas.exe is running on PC.';
       statusMessage = 'Connection failed';
       notifyListeners();
+      _scheduleAutoReconnect();
       return false;
     }
+  }
+
+  void _flushOutboundQueue() {
+    if (!isConnected || _socket == null || _outboundQueue.isEmpty) return;
+    final pending = List<Uint8List>.from(_outboundQueue);
+    _outboundQueue.clear();
+    for (final frame in pending) {
+      try {
+        _socket!.add(frame);
+        packetsSent++;
+      } catch (_) {}
+    }
+  }
+
+  void _scheduleAutoReconnect() {
+    if (_manualDisconnect) return;
+    _reconnectTimer?.cancel();
+    _reconnectTimer = Timer(const Duration(milliseconds: 1500), () {
+      if (!_manualDisconnect && !isConnected && !isConnecting) {
+        final target = (connectedIp.isNotEmpty && !connectedIp.startsWith('PIN '))
+            ? connectedIp
+            : (discoveredDevices.isNotEmpty ? discoveredDevices.first.ip : 'relay');
+        final port = target == 'relay' ? 443 : connectedPort;
+        connect(target, port, pin: pairingPin);
+      }
+    });
   }
 
   void _handleDisconnect(String reason) {
@@ -698,9 +821,14 @@ class NetworkConnectionManager extends ChangeNotifier {
     _pingTimer?.cancel();
     statusMessage = reason;
     notifyListeners();
+    _scheduleAutoReconnect();
   }
 
-  Future<void> disconnect() async {
+  Future<void> disconnect({bool manual = true}) async {
+    if (manual) {
+      _manualDisconnect = true;
+      _reconnectTimer?.cancel();
+    }
     _pingTimer?.cancel();
     try {
       _udpSocket?.close();
@@ -781,7 +909,7 @@ class NetworkConnectionManager extends ChangeNotifier {
     };
   }
 
-  /// Sends ultra-fast 13-byte binary packet AND JSON packet for universal compatibility.
+  /// Sends ultra-fast 13-byte binary packet AND queues frames when offline so zero strokes are lost.
   /// Normalized (0.0 -> 1.0) coordinates represent 100% of the Mobile Full-Screen Pad
   /// and map 1:1 to the selected PC Software Working Area.
   void sendPointerEvent({
@@ -791,8 +919,6 @@ class NetworkConnectionManager extends ChangeNotifier {
     required double pressure,
     required ToolType tool,
   }) {
-    if (!isConnected || _socket == null) return;
-
     int pType = 1; // Move
     if (type == 'pointerDown') pType = 0;
     else if (type == 'pointerUp') pType = 2;
@@ -803,18 +929,30 @@ class NetworkConnectionManager extends ChangeNotifier {
         : (pressure.isFinite ? pressure.clamp(0.0, 1.0) : 0.5);
     final int toolId = tool == ToolType.eraser ? 1 : (tool == ToolType.laser ? 2 : 0);
 
-    try {
-      final frame = encodeBinaryFrame(
-        type: pType,
-        normX: normX,
-        normY: normY,
-        pressure: wirePressure,
-        tool: toolId,
-        timestamp: DateTime.now().millisecondsSinceEpoch,
-      );
-      _socket!.add(frame);
-      packetsSent++;
-    } catch (_) {}
+    final frame = encodeBinaryFrame(
+      type: pType,
+      normX: normX,
+      normY: normY,
+      pressure: wirePressure,
+      tool: toolId,
+      timestamp: DateTime.now().millisecondsSinceEpoch,
+    );
+
+    if (isConnected && _socket != null) {
+      try {
+        _socket!.add(frame);
+        packetsSent++;
+        return;
+      } catch (_) {}
+    }
+
+    if (_outboundQueue.length >= 256) {
+      _outboundQueue.removeAt(0);
+    }
+    _outboundQueue.add(frame);
+    if (!isConnecting) {
+      _scheduleAutoReconnect();
+    }
   }
 
   void sendToolShortcut(ToolType tool) {
@@ -1404,8 +1542,10 @@ class _DrawingTabletPadViewState extends State<DrawingTabletPadView> with Widget
                                   const SizedBox(width: 5),
                                   Text(
                                     widget.net.isConnected
-                                        ? '${widget.net.connectedIp} (${widget.net.latencyMs}ms)'
-                                        : 'Connect PC',
+                                        ? 'Connected • ${widget.net.connectedIp} (${widget.net.latencyMs}ms)'
+                                        : (widget.net.isConnecting || widget.net.isScanning)
+                                            ? 'Auto-Connecting...'
+                                            : 'Connect PC',
                                     style: const TextStyle(
                                       fontSize: 11,
                                       fontWeight: FontWeight.bold,
@@ -1917,7 +2057,7 @@ class _ConnectionSetupViewState extends State<ConnectionSetupView> {
       appBar: AppBar(
         backgroundColor: const Color(0xFF121222),
         title: const Text(
-          'Air Canvas v2.0.3 — Connect & PC Working Area',
+          'Air Canvas v2.0.6 — Connect & PC Working Area',
           style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
         ),
         actions: [

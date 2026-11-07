@@ -42,7 +42,7 @@ export const GitHubReleaseModal: React.FC<GitHubReleaseModalProps> = ({ isOpen, 
 
   const handleDirectPush = async () => {
     setPushState('pushing');
-    setPushFeedback('Committing changes and pushing branch main + tag v2.0.5 to GitHub...');
+    setPushFeedback('Committing changes and pushing branch main + tag v2.0.6 to GitHub...');
     try {
       const resp = await fetch('/api/github-push', {
         method: 'POST',
@@ -55,7 +55,7 @@ export const GitHubReleaseModal: React.FC<GitHubReleaseModalProps> = ({ isOpen, 
       const data = await resp.json();
       if (resp.ok && data.ok) {
         setPushState('success');
-        setPushFeedback(data.message || 'Pushed main and v2.0.5 to GitHub!');
+        setPushFeedback(data.message || 'Pushed main and v2.0.6 to GitHub!');
       } else {
         setPushState('error');
         setPushFeedback(
@@ -76,18 +76,18 @@ export const GitHubReleaseModal: React.FC<GitHubReleaseModalProps> = ({ isOpen, 
   const pushCommand = `git init
 git checkout -B main
 git add -A
-git commit -m "Release AirCanvas v2.0.5 — Tri-Transport Auto-Bridge, 1:1 Ratio/Rotation & Offline Queue"
+git commit -m "Release AirCanvas v2.0.6 — Tri-Transport Auto-Bridge, 1:1 Ratio/Rotation & Offline Queue"
 git remote remove origin 2>/dev/null || true
 git remote add origin ${targetRemote}
 git push -u origin main --force
-git tag -f -a v2.0.5 -m "Air Canvas v2.0.5 Release"
-git push origin v2.0.5 --force`;
+git tag -f -a v2.0.6 -m "Air Canvas v2.0.6 Release"
+git push origin v2.0.6 --force`;
 
   const tokenPushCommand = patToken.trim()
     ? `git push https://${patToken.trim()}@github.com/${cleanRepo}.git HEAD:refs/heads/main --force
-git push https://${patToken.trim()}@github.com/${cleanRepo}.git refs/tags/v2.0.5:refs/tags/v2.0.5 --force`
+git push https://${patToken.trim()}@github.com/${cleanRepo}.git refs/tags/v2.0.6:refs/tags/v2.0.6 --force`
     : `git push https://<YOUR_GITHUB_PERSONAL_ACCESS_TOKEN>@github.com/${cleanRepo}.git HEAD:refs/heads/main --force
-git push https://<YOUR_GITHUB_PERSONAL_ACCESS_TOKEN>@github.com/${cleanRepo}.git refs/tags/v2.0.5:refs/tags/v2.0.5 --force`;
+git push https://<YOUR_GITHUB_PERSONAL_ACCESS_TOKEN>@github.com/${cleanRepo}.git refs/tags/v2.0.6:refs/tags/v2.0.6 --force`;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm animate-in fade-in duration-200">
@@ -102,11 +102,11 @@ git push https://<YOUR_GITHUB_PERSONAL_ACCESS_TOKEN>@github.com/${cleanRepo}.git
               <div className="flex items-center gap-2">
                 <h3 className="text-lg font-bold text-white">GitHub Push & Release (APK + EXE)</h3>
                 <span className="px-2 py-0.5 rounded-full text-[10px] font-mono font-bold bg-cyan-500/20 text-cyan-300 border border-cyan-500/30">
-                  v2.0.5
+                  v2.0.6
                 </span>
               </div>
               <p className="text-xs text-slate-400 mt-0.5">
-                Automated v2.0.5 release workflow with Windows AirCanvas.exe + Server + Android AirCanvas-release.apk
+                Automated v2.0.6 release workflow with Windows AirCanvas.exe + Server + Android AirCanvas-release.apk
               </p>
             </div>
           </div>
@@ -203,7 +203,7 @@ git push https://<YOUR_GITHUB_PERSONAL_ACCESS_TOKEN>@github.com/${cleanRepo}.git
 
             <div className="flex items-center justify-between pt-1 border-t border-slate-800/80">
               <span className="text-[10px] text-slate-400">
-                Release Tag: <strong className="text-cyan-300 font-mono">v2.0.5</strong> (17 Suites / 2,039 Assertions Verified)
+                Release Tag: <strong className="text-cyan-300 font-mono">v2.0.6</strong> (17 Suites / 2,039 Assertions Verified)
               </span>
               <a
                 href={`https://github.com/${cleanRepo}/releases`}
@@ -221,10 +221,10 @@ git push https://<YOUR_GITHUB_PERSONAL_ACCESS_TOKEN>@github.com/${cleanRepo}.git
           <div className="p-4 rounded-2xl bg-slate-950/60 border border-slate-800 space-y-2">
             <div className="flex items-center gap-2 text-cyan-400 font-bold text-xs">
               <ShieldCheck className="w-4 h-4" />
-              <span>Local Git Repository Staged & Tagged (v2.0.5)</span>
+              <span>Local Git Repository Staged & Tagged (v2.0.6)</span>
             </div>
             <p className="text-slate-300 leading-relaxed text-[11px]">
-              All updated Web Studio, Flutter Android APK (<code className="text-cyan-300 font-mono">lib/main.dart</code>), and Windows C# native server (<code className="text-cyan-300 font-mono">AirCanvasServer.cs</code>) files are committed on branch <code className="text-cyan-300 font-mono">main</code> with tag <code className="text-cyan-300 font-mono">v2.0.5</code> ready to push to <a href="https://github.com/hasibcore/Air_Canvas" target="_blank" rel="noopener noreferrer" className="text-cyan-300 underline font-mono">https://github.com/hasibcore/Air_Canvas</a>.
+              All updated Web Studio, Flutter Android APK (<code className="text-cyan-300 font-mono">lib/main.dart</code>), and Windows C# native server (<code className="text-cyan-300 font-mono">AirCanvasServer.cs</code>) files are committed on branch <code className="text-cyan-300 font-mono">main</code> with tag <code className="text-cyan-300 font-mono">v2.0.6</code> ready to push to <a href="https://github.com/hasibcore/Air_Canvas" target="_blank" rel="noopener noreferrer" className="text-cyan-300 underline font-mono">https://github.com/hasibcore/Air_Canvas</a>.
             </p>
           </div>
 

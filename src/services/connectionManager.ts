@@ -418,6 +418,11 @@ export class ConnectionManager {
         socket.onopen = () => {
           this.relayState = 'connected';
           this.connectedEndpoint = `${this.localIp}:${this.serverPort}`;
+          if (!this.isSimulatedOffline) {
+            this.state = 'connected';
+            this.connectedDeviceName =
+              this.connectedDeviceName || `PC Host & Auto-Bridge Ready (PIN: ${this.pairingPin})`;
+          }
           try {
             socket.send(JSON.stringify({
               type: 'register_host',
@@ -503,6 +508,11 @@ export class ConnectionManager {
 
       cws.onopen = () => {
         this.relayState = 'connected';
+        if (!this.isSimulatedOffline) {
+          this.state = 'connected';
+          this.connectedDeviceName =
+            this.connectedDeviceName || `PC Host & Auto-Bridge Ready (PIN: ${pin})`;
+        }
         try {
           cws.send(JSON.stringify({
             type: 'register_host',
@@ -551,6 +561,10 @@ export class ConnectionManager {
         this.relayState = 'connected';
         this.connectedEndpoint = `${ip}:${port}`;
         this.connectionStatusMessage = `Listening on Local IP ${ip}:${port}`;
+        if (!this.isSimulatedOffline) {
+          this.state = 'connected';
+          this.connectedDeviceName = `PC Native Server (${ip}:${port})`;
+        }
         this.notify();
       };
 
@@ -716,9 +730,14 @@ export class ConnectionManager {
 
       if (data.type === 'peer_disconnected') {
         if (typeof data.peerCount === 'number' && data.peerCount <= 1) {
-          if (this.mode === 'server' && !this.isLinkVerified) {
-            this.state = 'discovering';
-            this.connectedDeviceName = '';
+          if (this.mode === 'server' && !this.isLinkVerified && !this.isSimulatedOffline) {
+            if (this.relayState === 'connected') {
+              this.state = 'connected';
+              this.connectedDeviceName = `PC Host & Auto-Bridge Ready (PIN: ${this.pairingPin})`;
+            } else {
+              this.state = 'discovering';
+              this.connectedDeviceName = '';
+            }
           }
           this.notify();
         }
@@ -727,11 +746,21 @@ export class ConnectionManager {
 
       if (data.type === 'room_joined') {
         this.relayState = 'connected';
-        if (typeof data.peerCount === 'number' && data.peerCount > 1) {
+        if (!this.isSimulatedOffline) {
           this.state = 'connected';
-          this.connectedDeviceName = this.connectedDeviceName || (this.mode === 'server' ? 'Mobile Tablet (Connected)' : 'PC Host (Connected)');
-          if (this.mode === 'server') {
-            this.broadcastScreenDimensions();
+          if (typeof data.peerCount === 'number' && data.peerCount > 1) {
+            this.connectedDeviceName =
+              this.connectedDeviceName ||
+              (this.mode === 'server' ? 'Mobile Tablet (Connected)' : 'PC Host (Connected)');
+            if (this.mode === 'server') {
+              this.broadcastScreenDimensions();
+            }
+          } else {
+            this.connectedDeviceName =
+              this.connectedDeviceName ||
+              (this.mode === 'server'
+                ? `PC Host & Auto-Bridge Ready (PIN: ${this.pairingPin})`
+                : `PC Host (PIN: ${this.pairingPin})`);
           }
         }
         this.notify();

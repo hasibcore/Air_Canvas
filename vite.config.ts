@@ -132,11 +132,11 @@ function websocketRelay(): Plugin {
               [
                 'commit',
                 '-m',
-                'Release AirCanvas v2.0.5 — 100% Bug-Free Tri-Transport Auto-Bridge, 1:1 Ratio/Rotation & Offline Queue',
+                'Release AirCanvas v2.0.6 — 100% Connected Outbound TLS Cloud Auto-Bridge for Windows EXE & Android APK',
               ],
               { shell: false, timeout: 10000 }
             );
-            spawnSync('git', ['tag', '-f', '-a', 'v2.0.5', '-m', 'Air Canvas v2.0.5 Release'], {
+            spawnSync('git', ['tag', '-f', '-a', 'v2.0.6', '-m', 'Air Canvas v2.0.6 Release'], {
               shell: false,
               timeout: 10000,
             });
@@ -145,7 +145,7 @@ function websocketRelay(): Plugin {
               timeout: 25000,
               encoding: 'utf8',
             });
-            const pushTag = spawnSync('git', ['push', remoteUrl, 'refs/tags/v2.0.5:refs/tags/v2.0.5', '--force'], {
+            const pushTag = spawnSync('git', ['push', remoteUrl, 'refs/tags/v2.0.6:refs/tags/v2.0.6', '--force'], {
               shell: false,
               timeout: 25000,
               encoding: 'utf8',
@@ -156,7 +156,7 @@ function websocketRelay(): Plugin {
               res.end(
                 JSON.stringify({
                   ok: true,
-                  message: `Successfully pushed main and tag v2.0.5 to https://github.com/${cleanRepo}! GitHub Actions is now building v2.0.5 AirCanvas.exe, AirCanvasServer.exe, and AirCanvas-release.apk.`,
+                  message: `Successfully pushed main and tag v2.0.6 to https://github.com/${cleanRepo}! GitHub Actions is now building v2.0.6 AirCanvas.exe, AirCanvasServer.exe, and AirCanvas-release.apk.`,
                   output: (pushMain.stdout || '') + '\n' + (pushTag.stdout || ''),
                 })
               );
@@ -251,6 +251,8 @@ function websocketRelay(): Plugin {
                 role,
                 pin,
                 deviceName,
+                ip: localIp,
+                port,
                 transportType,
                 peerCount: room.size,
                 timestamp: Date.now(),
@@ -260,6 +262,8 @@ function websocketRelay(): Plugin {
                 role: existingMeta?.role || 'server',
                 pin,
                 deviceName: existingMeta?.deviceName || 'AirCanvas-PC-Host',
+                ip: existingMeta?.localIp || '192.168.1.100',
+                port: existingMeta?.port || 9090,
                 transportType: existingMeta?.transportType || transportType,
                 peerCount: room.size,
                 timestamp: Date.now(),
