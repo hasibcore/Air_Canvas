@@ -122,7 +122,7 @@ namespace AirCanvas.Server
 
     public class AirCanvasServer
     {
-        public const string VERSION = "2.0.8 PRO";
+        public const string VERSION = "2.0.9 PRO";
         public const int DEFAULT_PORT = 9090;
         public const int DISCOVERY_PORT = 9091;
         public const string CLOUD_RELAY_HOST = "ais-pre-2wmsbni7lh5hjxll4p27tc-851170313359.asia-northeast1.run.app";
@@ -881,6 +881,15 @@ namespace AirCanvas.Server
                              ",\"aspectRatio\":" + aspectStr + "}";
 
                 BroadcastWsTextMessage(msg, null);
+                List<Stream> relayStreams;
+                lock (_cloudLock)
+                {
+                    relayStreams = new List<Stream>(_cloudRelayStreams);
+                }
+                foreach (Stream rs in relayStreams)
+                {
+                    SendMaskedClientWsText(rs, msg);
+                }
             }
             catch { }
         }
@@ -1474,6 +1483,7 @@ namespace AirCanvas.Server
         public static bool CloudTabletConnected = false;
         public static string ActivePairingPin = "1234";
         private static Stream _cloudRelayStream = null;
+        private static readonly List<Stream> _cloudRelayStreams = new List<Stream>();
         private static readonly object _cloudLock = new object();
         public static readonly List<NetworkStream> _activeClients = new List<NetworkStream>();
         public static readonly List<NetworkStream> _remoteTabletStreams = new List<NetworkStream>();
@@ -1634,7 +1644,12 @@ namespace AirCanvas.Server
 
             try
             {
-                ServicePointManager.SecurityProtocol |= (SecurityProtocolType)3072; // TLS 1.2
+                ServicePointManager.SecurityProtocol |= (SecurityProtocolType)3072 | (SecurityProtocolType)768 | (SecurityProtocolType)192;
+            }
+            catch { }
+            try
+            {
+                ServicePointManager.SecurityProtocol |= (SecurityProtocolType)12288; // TLS 1.3 when supported
             }
             catch { }
 
@@ -1667,7 +1682,21 @@ namespace AirCanvas.Server
                         tcp.EndConnect(ar);
 
                         ssl = new SslStream(tcp.GetStream(), false, (sender, certificate, chain, sslPolicyErrors) => true);
-                        ssl.AuthenticateAsClient(relayHost, null, (SslProtocols)3072, false);
+                        try
+                        {
+                            ssl.AuthenticateAsClient(relayHost, null, (SslProtocols)3072 | (SslProtocols)12288, false);
+                        }
+                        catch
+                        {
+                            try
+                            {
+                                ssl.AuthenticateAsClient(relayHost, null, (SslProtocols)3072, false);
+                            }
+                            catch
+                            {
+                                ssl.AuthenticateAsClient(relayHost);
+                            }
+                        }
 
                         string wsKey = Convert.ToBase64String(Guid.NewGuid().ToByteArray());
                         string path = "/ws?pin=" + Uri.EscapeDataString(pin) +
@@ -1711,9 +1740,13 @@ namespace AirCanvas.Server
                             continue;
                         }
 
-                        if (isPrimary)
+                        lock (_cloudLock)
                         {
-                            lock (_cloudLock)
+                            if (!_cloudRelayStreams.Contains(ssl))
+                            {
+                                _cloudRelayStreams.Add(ssl);
+                            }
+                            if (isPrimary || _cloudRelayStream == null)
                             {
                                 _cloudRelayStream = ssl;
                             }
@@ -1867,13 +1900,20 @@ namespace AirCanvas.Server
                     finally
                     {
                         bridgeActive = false;
-                        if (isPrimary)
+                        lock (_cloudLock)
                         {
-                            IsCloudRelayConnected = false;
-                            CloudTabletConnected = false;
-                            lock (_cloudLock)
+                            if (ssl != null)
                             {
-                                _cloudRelayStream = null;
+                                _cloudRelayStreams.Remove(ssl);
+                            }
+                            if (_cloudRelayStream == ssl)
+                            {
+                                _cloudRelayStream = _cloudRelayStreams.Count > 0 ? _cloudRelayStreams[0] : null;
+                            }
+                            if (_cloudRelayStreams.Count == 0)
+                            {
+                                IsCloudRelayConnected = false;
+                                CloudTabletConnected = false;
                             }
                         }
                         try { if (ssl != null) ssl.Close(); } catch { }

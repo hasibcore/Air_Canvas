@@ -132,11 +132,11 @@ function websocketRelay(): Plugin {
               [
                 'commit',
                 '-m',
-                'Release AirCanvas v2.0.8 — Dual-Relay Cloud Auto-Bridge, 1:1 Ratio/Rotation & Zero-Lag Pen Injection',
+                'Release AirCanvas v2.0.9 — Dual-Relay Cloud Auto-Bridge, 1:1 Ratio/Rotation & Zero-Lag Pen Injection',
               ],
               { shell: false, timeout: 10000 }
             );
-            spawnSync('git', ['tag', '-f', '-a', 'v2.0.8', '-m', 'Air Canvas v2.0.8 Release'], {
+            spawnSync('git', ['tag', '-f', '-a', 'v2.0.9', '-m', 'Air Canvas v2.0.9 Release'], {
               shell: false,
               timeout: 10000,
             });
@@ -145,7 +145,7 @@ function websocketRelay(): Plugin {
               timeout: 25000,
               encoding: 'utf8',
             });
-            const pushTag = spawnSync('git', ['push', remoteUrl, 'refs/tags/v2.0.8:refs/tags/v2.0.8', '--force'], {
+            const pushTag = spawnSync('git', ['push', remoteUrl, 'refs/tags/v2.0.9:refs/tags/v2.0.9', '--force'], {
               shell: false,
               timeout: 25000,
               encoding: 'utf8',
@@ -156,7 +156,7 @@ function websocketRelay(): Plugin {
               res.end(
                 JSON.stringify({
                   ok: true,
-                  message: `Successfully pushed main and tag v2.0.8 to https://github.com/${cleanRepo}! GitHub Actions is now building v2.0.8 AirCanvas.exe, AirCanvasServer.exe, and AirCanvas-release.apk.`,
+                  message: `Successfully pushed main and tag v2.0.9 to https://github.com/${cleanRepo}! GitHub Actions is now building v2.0.9 AirCanvas.exe, AirCanvasServer.exe, and AirCanvas-release.apk.`,
                   output: (pushMain.stdout || '') + '\n' + (pushTag.stdout || ''),
                 })
               );

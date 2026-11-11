@@ -136,9 +136,7 @@ export function App() {
         const w = Math.max(320, window.innerWidth || window.screen?.width || 1920);
         const h = Math.max(240, window.innerHeight || window.screen?.height || 1080);
         engine.setPcScreenDimensions(w, h);
-        if (connection.state === 'disconnected') {
-          connection.startServer(connection.pairingPin || '1234');
-        }
+        connection.startServer(connection.pairingPin || '1234');
         connection.broadcastScreenDimensions(w, h);
         connection.sendSoftwareSync(engine.activeSoftwareId, engine.softwareWorkingArea);
       }

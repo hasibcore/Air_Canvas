@@ -1,6 +1,6 @@
 // ==============================================================================
 // AirCanvasDesktop.cs
-// Standalone Windows GUI Desktop Application & Local Asset Server (v2.0.8 PRO)
+// Standalone Windows GUI Desktop Application & Local Asset Server (v2.0.9 PRO)
 // Native Pen Injector + Built-in WinForms Host Window + Embedded HTTP/WS Server
 // ==============================================================================
 

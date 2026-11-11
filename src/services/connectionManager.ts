@@ -509,7 +509,11 @@ export class ConnectionManager {
     this.notify();
   }
 
-  private connectCloudHostBridge(pin: string, relayHost = ConnectionManager.CLOUD_RELAY_HOST): void {
+  private connectCloudHostBridge(
+    pin: string,
+    relayHost = ConnectionManager.CLOUD_RELAY_HOST,
+    role: 'server' | 'client' = 'server'
+  ): void {
     if (typeof window === 'undefined') return;
     try {
       if (this.cloudBridgeWs) {
@@ -519,8 +523,10 @@ export class ConnectionManager {
         } catch {}
         this.cloudBridgeWs = null;
       }
-      const hostName = encodeURIComponent('AirCanvas-PC-Host');
-      const cloudUrl = `wss://${relayHost}/ws?pin=${encodeURIComponent(pin)}&role=server&name=${hostName}&ip=${encodeURIComponent(this.localIp)}&port=${this.serverPort}`;
+      const nodeName = encodeURIComponent(
+        role === 'server' ? 'AirCanvas-PC-Host' : this.getClientDeviceName()
+      );
+      const cloudUrl = `wss://${relayHost}/ws?pin=${encodeURIComponent(pin)}&role=${role}&name=${nodeName}&ip=${encodeURIComponent(this.localIp)}&port=${this.serverPort}`;
       const cws = new WebSocket(cloudUrl);
       cws.binaryType = 'arraybuffer';
       this.cloudBridgeWs = cws;
@@ -533,14 +539,26 @@ export class ConnectionManager {
             this.connectedDeviceName || `PC Host & Auto-Bridge Ready (PIN: ${pin})`;
         }
         try {
-          cws.send(JSON.stringify({
-            type: 'register_host',
-            pin,
-            name: 'AirCanvas-PC-Host',
-            ip: this.localIp,
-            port: this.serverPort,
-          }));
+          if (role === 'server') {
+            cws.send(JSON.stringify({
+              type: 'register_host',
+              pin,
+              name: 'AirCanvas-PC-Host',
+              ip: this.localIp,
+              port: this.serverPort,
+            }));
+          } else {
+            cws.send(JSON.stringify({
+              type: 'connect_request',
+              senderId: this.id,
+              senderMode: 'client',
+              pin,
+              transportType: this.transportType || 'wifi',
+              timestamp: Date.now(),
+            }));
+          }
         } catch {}
+        this.flushOutboundQueue(cws);
         this.notify();
       };
 
@@ -551,7 +569,7 @@ export class ConnectionManager {
         if (this.localServerWs && this.localServerWs.readyState === WebSocket.OPEN) {
           if (ev.data instanceof ArrayBuffer) {
             try { this.localServerWs.send(ev.data); } catch {}
-          } else if (typeof ev.data === 'string' && (ev.data.includes('pointer') || ev.data.includes('workArea') || ev.data.includes('action'))) {
+          } else if (typeof ev.data === 'string' && (ev.data.includes('pointer') || ev.data.includes('input_event') || ev.data.includes('workArea') || ev.data.includes('action'))) {
             try { this.localServerWs.send(ev.data); } catch {}
           }
         }
@@ -1256,7 +1274,15 @@ export class ConnectionManager {
     const relayUrl = `${proto}//${window.location.host}/ws?pin=${encodeURIComponent(cleanPin)}&role=client&name=${encodeURIComponent(clientName)}&transport=${encodeURIComponent(transport)}`;
     const relayFallbackUrl = `${proto}//${window.location.host}/aircanvas?pin=${encodeURIComponent(cleanPin)}&role=client&name=${encodeURIComponent(clientName)}&transport=${encodeURIComponent(transport)}`;
 
-    const isCloudRelay = ip === 'relay' || ip === 'cloud' || ip === window.location.hostname || ip === window.location.host || ip.includes('.run.app') || transport === 'cloud';
+    const isCloudRelay =
+      ip === 'relay' ||
+      ip === 'cloud' ||
+      ip.toLowerCase().startsWith('pin') ||
+      /^\d{4}$/.test(ip) ||
+      ip === window.location.hostname ||
+      ip === window.location.host ||
+      ip.includes('.run.app') ||
+      transport === 'cloud';
     const candidates: { url: string; label: string; modeType: TransportType; timeoutMs: number }[] = [];
 
     if (isCloudRelay) {
@@ -1264,14 +1290,30 @@ export class ConnectionManager {
         url: relayUrl,
         label: `Cloud Relay (PIN: ${cleanPin})`,
         modeType: 'cloud',
-        timeoutMs: 3000,
+        timeoutMs: 2500,
       });
       candidates.push({
         url: relayFallbackUrl,
         label: `Cloud Relay Fallback (PIN: ${cleanPin})`,
         modeType: 'cloud',
-        timeoutMs: 2500,
+        timeoutMs: 2000,
       });
+      if (!window.location.host.includes(ConnectionManager.CLOUD_RELAY_HOST)) {
+        candidates.push({
+          url: `wss://${ConnectionManager.CLOUD_RELAY_HOST}/ws?pin=${encodeURIComponent(cleanPin)}&role=client&name=${encodeURIComponent(clientName)}&transport=cloud`,
+          label: `Auto-Bridge Cloud Relay (PIN: ${cleanPin})`,
+          modeType: 'cloud',
+          timeoutMs: 2500,
+        });
+      }
+      if (!window.location.host.includes(ConnectionManager.DEV_RELAY_HOST)) {
+        candidates.push({
+          url: `wss://${ConnectionManager.DEV_RELAY_HOST}/ws?pin=${encodeURIComponent(cleanPin)}&role=client&name=${encodeURIComponent(clientName)}&transport=cloud`,
+          label: `Auto-Bridge Dev Relay (PIN: ${cleanPin})`,
+          modeType: 'cloud',
+          timeoutMs: 2500,
+        });
+      }
     } else if (transport === 'usb' || ip === '127.0.0.1') {
       // On HTTP, try direct localhost ADB port first, then instant Web Relay fallback.
       // On HTTPS, browsers block ws://127.0.0.1 on some platforms or require wss:// relay fallback.
@@ -1280,13 +1322,13 @@ export class ConnectionManager {
           url: `ws://127.0.0.1:${port}/aircanvas?pin=${encodeURIComponent(cleanPin)}&role=client&transport=usb`,
           label: `USB Direct Port (${port})`,
           modeType: 'usb',
-          timeoutMs: 1200,
+          timeoutMs: 900,
         });
         candidates.push({
           url: `ws://127.0.0.1:3000/ws?pin=${encodeURIComponent(cleanPin)}&role=client&transport=usb`,
           label: `USB Local Relay (3000)`,
           modeType: 'usb',
-          timeoutMs: 1200,
+          timeoutMs: 900,
         });
       }
       // Instant Web Relay fallback preserving USB mode & PIN so USB button never fails on HTTPS or without ADB
@@ -1294,25 +1336,25 @@ export class ConnectionManager {
         url: relayUrl,
         label: `USB Bridge Relay (PIN: ${cleanPin})`,
         modeType: 'usb',
-        timeoutMs: 3000,
+        timeoutMs: 2500,
       });
     } else {
       // Same Wi-Fi mode:
-      // If on HTTP, probe direct LAN IP first with fast 1.2s timeout, then fall back to Web Relay.
+      // If on HTTP, probe direct LAN IP first with fast 900ms timeout, then fall back to Web Relay.
       // If on HTTPS, browsers block ws://192.168.x.x (Mixed Content), so use wss:// Web Relay directly while preserving 'wifi' transport!
       if (!isHttps && ip && ip !== 'relay' && ip !== 'cloud') {
         candidates.push({
           url: `ws://${ip}:${port}/aircanvas?pin=${encodeURIComponent(cleanPin)}&role=client&transport=wifi`,
           label: `Same Wi-Fi Direct (${ip}:${port})`,
           modeType: 'wifi',
-          timeoutMs: 1200,
+          timeoutMs: 900,
         });
         if (port !== 3000) {
           candidates.push({
             url: `ws://${ip}:3000/ws?pin=${encodeURIComponent(cleanPin)}&role=client&transport=wifi`,
             label: `Same Wi-Fi Web Port (${ip}:3000)`,
             modeType: 'wifi',
-            timeoutMs: 1200,
+            timeoutMs: 900,
           });
         }
       }
@@ -1320,20 +1362,28 @@ export class ConnectionManager {
         url: relayUrl,
         label: `Same Wi-Fi Relay (PIN: ${cleanPin})`,
         modeType: 'wifi',
-        timeoutMs: 3000,
+        timeoutMs: 2500,
       });
       candidates.push({
         url: relayFallbackUrl,
         label: `Wi-Fi Fallback Relay (PIN: ${cleanPin})`,
         modeType: 'wifi',
-        timeoutMs: 2500,
+        timeoutMs: 2000,
       });
       if (!window.location.host.includes(ConnectionManager.CLOUD_RELAY_HOST)) {
         candidates.push({
           url: `wss://${ConnectionManager.CLOUD_RELAY_HOST}/ws?pin=${encodeURIComponent(cleanPin)}&role=client&name=${encodeURIComponent(clientName)}&transport=wifi`,
           label: `Auto-Bridge Cloud Relay (PIN: ${cleanPin})`,
           modeType: 'wifi',
-          timeoutMs: 3000,
+          timeoutMs: 2500,
+        });
+      }
+      if (!window.location.host.includes(ConnectionManager.DEV_RELAY_HOST)) {
+        candidates.push({
+          url: `wss://${ConnectionManager.DEV_RELAY_HOST}/ws?pin=${encodeURIComponent(cleanPin)}&role=client&name=${encodeURIComponent(clientName)}&transport=wifi`,
+          label: `Auto-Bridge Dev Relay (PIN: ${cleanPin})`,
+          modeType: 'wifi',
+          timeoutMs: 2500,
         });
       }
     }
@@ -1384,6 +1434,12 @@ export class ConnectionManager {
         const prefix = cand.modeType === 'usb' ? 'USB Cable' : (cand.modeType === 'cloud' ? 'QR / Cloud' : 'Same Wi-Fi');
         this.connectedDeviceName = `PC Host • ${prefix} (PIN: ${cleanPin})`;
         this.startHeartbeat();
+
+        // Also open complementary Cloud Relay mirror so client strokes reach both ais-pre and ais-dev hosts simultaneously
+        const targetBridgeHost = window.location.host.includes(ConnectionManager.CLOUD_RELAY_HOST)
+          ? ConnectionManager.DEV_RELAY_HOST
+          : ConnectionManager.CLOUD_RELAY_HOST;
+        this.connectCloudHostBridge(cleanPin, targetBridgeHost, 'client');
 
         // Send formal handshake over the WebSocket so the Host PC immediately transitions to Connected & receives client info
         try {
