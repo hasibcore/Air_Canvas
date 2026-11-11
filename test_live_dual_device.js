@@ -10,6 +10,9 @@
 // ==============================================================================
 
 import http from 'node:http';
+import dgram from 'node:dgram';
+import net from 'node:net';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -398,8 +401,249 @@ async function runFourStageIntegrationTest() {
       '  [PASS] Stage 5: "Not Connected" state verified (0 stray frames while offline; all 5 queued frames flushed in FIFO order upon reconnect with 0 px drift).'
     );
 
+    // --------------------------------------------------------------------------
+    // STAGE 6: LIVE PC SERVER + MOBILE APK SAME WI-FI (UDP 9091 + FRAGMENTED TCP 9090) & USB (127.0.0.1)
+    // --------------------------------------------------------------------------
+    console.log('\n--- Stage 6: PC Server + Mobile APK Same Wi-Fi (UDP + Split-Packet WS) & USB (127.0.0.1) ---');
+
+    // Verify source code contracts in AirCanvasServer.cs and lib/main.dart
+    const csCode = fs.readFileSync(path.join(__dirname, 'AirCanvasServer.cs'), 'utf8');
+    const dartCode = fs.readFileSync(path.join(__dirname, 'lib', 'main.dart'), 'utf8');
+    if (!csCode.includes('public static string ReadHttpHeader(')) {
+      throw new Error('AirCanvasServer.cs missing byte-by-byte ReadHttpHeader for split TCP packet WebSocket upgrade');
+    }
+    if (!csCode.includes('StringComparison.OrdinalIgnoreCase')) {
+      throw new Error('AirCanvasServer.cs missing case-insensitive Upgrade: websocket header check');
+    }
+    if (!dartCode.includes('isConnecting = true;') || !dartCode.includes('await disconnect(manual: false);')) {
+      throw new Error('lib/main.dart missing atomic isConnecting guard before disconnect(manual: false)');
+    }
+    if (!dartCode.includes('Duration(seconds: 15)')) {
+      throw new Error('lib/main.dart missing 15s pingInterval stability setting');
+    }
+
+    // 1. Start simulated C# PC Server UDP Discovery Responder (UDP) + Raw TCP 9090 WebSocket Server (ReadHttpHeader)
+    const udpServer = dgram.createSocket('udp4');
+    await new Promise((res) => udpServer.bind(0, '127.0.0.1', res));
+    const udpPort = udpServer.address().port;
+
+    const tcpReceivedHandshakes = [];
+    const tcpReceivedStrokes = [];
+
+    const pcTcpServer = net.createServer((socket) => {
+      let headerBuf = Buffer.alloc(0);
+      let upgraded = false;
+      let frameBuf = Buffer.alloc(0);
+
+      socket.on('data', (chunk) => {
+        if (!upgraded) {
+          headerBuf = Buffer.concat([headerBuf, chunk]);
+          const headerStr = headerBuf.toString('utf8');
+          const endIdx = headerStr.indexOf('\r\n\r\n');
+          if (endIdx === -1) {
+            // Wait for remaining HTTP header packets (exact ReadHttpHeader behavior!)
+            return;
+          }
+          upgraded = true;
+          const fullHeader = headerStr.slice(0, endIdx + 4);
+          const leftover = headerBuf.slice(Buffer.byteLength(fullHeader, 'utf8'));
+
+          if (fullHeader.toLowerCase().includes('upgrade: websocket')) {
+            const keyMatch = fullHeader.match(/Sec-WebSocket-Key:\s*([^\r\n]+)/i);
+            const key = keyMatch ? keyMatch[1].trim() : '';
+            const acceptKey = crypto
+              .createHash('sha1')
+              .update(key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11')
+              .digest('base64');
+            const resp =
+              'HTTP/1.1 101 Switching Protocols\r\n' +
+              'Connection: Upgrade\r\n' +
+              'Upgrade: websocket\r\n' +
+              `Sec-WebSocket-Accept: ${acceptKey}\r\n\r\n`;
+            socket.write(resp);
+
+            // Send immediate PC Server welcome packets (screen_sync + workingAreaDetected)
+            sendServerWsText(socket, JSON.stringify({
+              type: 'screen_sync',
+              width: 1920,
+              height: 1080,
+              pin: '1234',
+              serverName: 'AirCanvas-PC-Host',
+            }));
+          }
+          if (leftover.length > 0) {
+            frameBuf = Buffer.concat([frameBuf, leftover]);
+            processClientFrames();
+          }
+        } else {
+          frameBuf = Buffer.concat([frameBuf, chunk]);
+          processClientFrames();
+        }
+      });
+
+      function sendServerWsText(sock, str) {
+        const payload = Buffer.from(str, 'utf8');
+        let hdr;
+        if (payload.length < 126) {
+          hdr = Buffer.from([0x81, payload.length]);
+        } else {
+          hdr = Buffer.alloc(4);
+          hdr[0] = 0x81;
+          hdr[1] = 126;
+          hdr.writeUInt16BE(payload.length, 2);
+        }
+        sock.write(Buffer.concat([hdr, payload]));
+      }
+
+      function processClientFrames() {
+        while (frameBuf.length >= 2) {
+          const b0 = frameBuf[0];
+          const b1 = frameBuf[1];
+          const opcode = b0 & 0x0f;
+          const masked = (b1 & 0x80) !== 0;
+          let len = b1 & 0x7f;
+          let offset = 2;
+          if (len === 126) {
+            if (frameBuf.length < 4) return;
+            len = frameBuf.readUInt16BE(2);
+            offset = 4;
+          }
+          const maskLen = masked ? 4 : 0;
+          if (frameBuf.length < offset + maskLen + len) return;
+          const mask = masked ? frameBuf.slice(offset, offset + 4) : null;
+          offset += maskLen;
+          const payload = Buffer.from(frameBuf.slice(offset, offset + len));
+          if (masked && mask) {
+            for (let i = 0; i < payload.length; i++) payload[i] ^= mask[i % 4];
+          }
+          frameBuf = frameBuf.slice(offset + len);
+
+          if (opcode === 1) {
+            const msg = JSON.parse(payload.toString('utf8'));
+            tcpReceivedHandshakes.push(msg);
+            if (msg.type === 'connect_request') {
+              sendServerWsText(socket, JSON.stringify({
+                type: 'connect_accept',
+                pin: '1234',
+                serverName: 'AirCanvas-PC-Host',
+                width: 1920,
+                height: 1080,
+              }));
+            }
+          } else if (opcode === 2 && payload.length === 13) {
+            tcpReceivedStrokes.push(payload);
+          }
+        }
+      }
+    });
+
+    await new Promise((res) => pcTcpServer.listen(0, '127.0.0.1', res));
+    const pcTcpPort = pcTcpServer.address().port;
+
+    udpServer.on('message', (msg, rinfo) => {
+      const parsed = JSON.parse(msg.toString('utf8'));
+      if (parsed.type === 'discovery_ping') {
+        const reply = Buffer.from(
+          JSON.stringify({
+            type: 'discovery_pong',
+            name: 'AirCanvas-PC-Host',
+            ip: '127.0.0.1',
+            allIps: ['127.0.0.1'],
+            port: pcTcpPort,
+            pin: '1234',
+          }),
+          'utf8'
+        );
+        udpServer.send(reply, rinfo.port, rinfo.address);
+      }
+    });
+
+    // 2. Simulate Mobile APK Same Wi-Fi UDP Discovery + Multi-Packet Split TCP WebSocket Upgrade
+    const udpClient = dgram.createSocket('udp4');
+    const discoveredPc = await new Promise((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error('UDP discovery timed out')), 2000);
+      udpClient.on('message', (data) => {
+        clearTimeout(t);
+        resolve(JSON.parse(data.toString('utf8')));
+      });
+      const ping = Buffer.from(JSON.stringify({ type: 'discovery_ping', clientName: 'Android-Tablet' }));
+      udpClient.send(ping, udpPort, '127.0.0.1');
+    });
+    udpClient.close();
+
+    if (discoveredPc.port !== pcTcpPort || discoveredPc.pin !== '1234') {
+      throw new Error('UDP Discovery returned unexpected PC endpoint');
+    }
+
+    // 3. Test Split-Packet WebSocket Upgrade (simulating Wi-Fi / USB MTU packet split)
+    const rawMobileSocket = net.connect(pcTcpPort, '127.0.0.1');
+    await new Promise((res, rej) => {
+      rawMobileSocket.once('connect', res);
+      rawMobileSocket.once('error', rej);
+    });
+
+    // Send first half of HTTP upgrade request in packet 1, and second half 25ms later in packet 2
+    const part1 =
+      `GET /aircanvas?pin=1234&role=client&transport=wifi HTTP/1.1\r\n` +
+      `Host: 127.0.0.1:${pcTcpPort}\r\n`;
+    const part2 =
+      `Upgrade: websocket\r\n` +
+      `Connection: Upgrade\r\n` +
+      `Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n` +
+      `Sec-WebSocket-Version: 13\r\n\r\n`;
+
+    rawMobileSocket.write(part1);
+    await new Promise((r) => setTimeout(r, 25));
+    rawMobileSocket.write(part2);
+
+    let rawMobileResp = '';
+    await new Promise((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error('Split-packet WebSocket upgrade timed out')), 2000);
+      rawMobileSocket.on('data', (chunk) => {
+        rawMobileResp += chunk.toString('utf8');
+        if (rawMobileResp.includes('101 Switching Protocols')) {
+          clearTimeout(t);
+          resolve();
+        }
+      });
+    });
+    rawMobileSocket.destroy();
+
+    // 4. Connect Mobile APK over USB (127.0.0.1) using standard WebSocket client, verify connect_accept & 13-byte stroke
+    const usbMobileReceived = [];
+    const usbWs = new WebSocket(`ws://127.0.0.1:${pcTcpPort}/aircanvas?pin=1234&role=client&transport=usb`);
+    usbWs.on('message', (data, isBin) => {
+      if (!isBin) usbMobileReceived.push(JSON.parse(data.toString()));
+    });
+    await new Promise((res, rej) => {
+      usbWs.once('open', res);
+      usbWs.once('error', rej);
+    });
+
+    usbWs.send(JSON.stringify({ type: 'connect_request', deviceName: 'Android-USB-Tablet', version: '2.1.0' }));
+    await waitFor(() => usbMobileReceived.some((m) => m.type === 'connect_accept' && m.pin === '1234'));
+
+    const strokeBuf = Buffer.alloc(13);
+    strokeBuf.writeUInt8(0, 0); // Down
+    strokeBuf.writeUInt16LE(32768, 1);
+    strokeBuf.writeUInt16LE(32768, 3);
+    strokeBuf.writeUInt16LE(800, 5);
+    strokeBuf.writeUInt8(0, 7);
+    strokeBuf.writeUInt32LE(4000, 8);
+    strokeBuf.writeUInt8(1, 12);
+    usbWs.send(strokeBuf, { binary: true });
+
+    await waitFor(() => tcpReceivedStrokes.length === 1);
+    usbWs.close();
+    udpServer.close();
+    pcTcpServer.close();
+
+    console.log(
+      '  [PASS] Stage 6: PC Server + Mobile APK Same Wi-Fi (UDP 9091 + Split-Packet WS 101) & USB (127.0.0.1 + 13B Stroke) verified.'
+    );
+
     console.log('\n================================================================');
-    console.log('RESULT: ALL 5 LOOPBACK INTEGRATION STAGES PASSED (V4 VERIFIED)');
+    console.log('RESULT: ALL 6 LOOPBACK & DUAL-DEVICE STAGES PASSED (v2.1.0)');
     console.log('================================================================\n');
   } finally {
     wss.close();

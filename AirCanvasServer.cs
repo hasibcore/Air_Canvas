@@ -122,7 +122,7 @@ namespace AirCanvas.Server
 
     public class AirCanvasServer
     {
-        public const string VERSION = "2.0.9 PRO";
+        public const string VERSION = "2.1.0 PRO";
         public const int DEFAULT_PORT = 9090;
         public const int DISCOVERY_PORT = 9091;
         public const string CLOUD_RELAY_HOST = "ais-pre-2wmsbni7lh5hjxll4p27tc-851170313359.asia-northeast1.run.app";
@@ -1609,28 +1609,61 @@ namespace AirCanvas.Server
             Thread adbThread = new Thread(() =>
             {
                 string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-                string sdkAdb = Path.Combine(localAppData, @"Android\Sdk\platform-tools\adb.exe");
+                string baseDir = "";
+                try { baseDir = AppDomain.CurrentDomain.BaseDirectory; } catch { }
+                string[] candidateAdbPaths = new string[]
+                {
+                    !string.IsNullOrEmpty(baseDir) ? Path.Combine(baseDir, "adb.exe") : "",
+                    Path.Combine(localAppData, @"Android\Sdk\platform-tools\adb.exe"),
+                    @"C:\platform-tools\adb.exe",
+                    @"C:\adb\adb.exe",
+                    @"C:\Android\platform-tools\adb.exe"
+                };
+
                 while (_isRunning)
                 {
                     try
                     {
-                        string adbCmd = File.Exists(sdkAdb) ? sdkAdb : "adb";
-                        ProcessStartInfo psi = new ProcessStartInfo
+                        string adbCmd = "adb";
+                        foreach (string cand in candidateAdbPaths)
                         {
-                            FileName = adbCmd,
-                            Arguments = "reverse tcp:9090 tcp:9090",
-                            CreateNoWindow = true,
-                            UseShellExecute = false,
-                            RedirectStandardOutput = true,
-                            RedirectStandardError = true
+                            if (!string.IsNullOrEmpty(cand) && File.Exists(cand))
+                            {
+                                adbCmd = cand;
+                                break;
+                            }
+                        }
+
+                        string[] reverseRules = new string[]
+                        {
+                            "reverse tcp:9090 tcp:9090",
+                            "reverse tcp:3005 tcp:3005",
+                            "reverse tcp:3000 tcp:3000"
                         };
-                        using (Process p = Process.Start(psi))
+
+                        foreach (string rule in reverseRules)
                         {
-                            if (p != null) p.WaitForExit(1200);
+                            try
+                            {
+                                ProcessStartInfo psi = new ProcessStartInfo
+                                {
+                                    FileName = adbCmd,
+                                    Arguments = rule,
+                                    CreateNoWindow = true,
+                                    UseShellExecute = false,
+                                    RedirectStandardOutput = true,
+                                    RedirectStandardError = true
+                                };
+                                using (Process p = Process.Start(psi))
+                                {
+                                    if (p != null) p.WaitForExit(1000);
+                                }
+                            }
+                            catch { }
                         }
                     }
                     catch { }
-                    Thread.Sleep(5000);
+                    Thread.Sleep(3000);
                 }
             });
             adbThread.IsBackground = true;
@@ -2137,6 +2170,37 @@ namespace AirCanvas.Server
             catch { }
         }
 
+        public static string ReadHttpHeader(NetworkStream stream)
+        {
+            if (stream == null) return "";
+            try { stream.ReadTimeout = 4000; } catch { }
+
+            StringBuilder sb = new StringBuilder();
+            int p3 = 0, p2 = 0, p1 = 0, cur = 0;
+            try
+            {
+                while ((cur = stream.ReadByte()) != -1)
+                {
+                    sb.Append((char)cur);
+                    if ((p3 == '\r' && p2 == '\n' && p1 == '\r' && cur == '\n') ||
+                        (p1 == '\n' && cur == '\n'))
+                    {
+                        break;
+                    }
+                    p3 = p2;
+                    p2 = p1;
+                    p1 = cur;
+                    if (sb.Length >= 8192) break;
+                }
+            }
+            catch { }
+            finally
+            {
+                try { stream.ReadTimeout = Timeout.Infinite; } catch { }
+            }
+            return sb.ToString();
+        }
+
         private static void HandleClient(TcpClient client)
         {
             NetworkStream stream = null;
@@ -2145,19 +2209,17 @@ namespace AirCanvas.Server
                 client.NoDelay = true;
                 stream = client.GetStream();
 
-                byte[] buffer = new byte[4096];
-                int bytesRead = stream.Read(buffer, 0, buffer.Length);
-                if (bytesRead <= 0) return;
+                string request = ReadHttpHeader(stream);
+                if (string.IsNullOrEmpty(request)) return;
 
-                string request = Encoding.UTF8.GetString(buffer, 0, bytesRead);
-
-                if (!request.Contains("Upgrade: websocket") && !request.Contains("upgrade: websocket"))
+                if (request.IndexOf("upgrade: websocket", StringComparison.OrdinalIgnoreCase) < 0)
                 {
                     if (request.Contains("/api/network-info") || request.Contains("/api/ip"))
                     {
                         string primaryIp = GetPrimaryLocalIp();
                         string allIpsJson = GetAllLocalIpsJsonArray();
-                        string json = "{\"ip\":\"" + primaryIp + "\",\"allIps\":" + allIpsJson + ",\"webPort\":3005,\"serverPort\":" + DEFAULT_PORT + ",\"pin\":\"1234\",\"version\":\"" + VERSION + "\"}";
+                        int tablets = GetConnectedTabletCount();
+                        string json = "{\"ip\":\"" + primaryIp + "\",\"allIps\":" + allIpsJson + ",\"webPort\":3005,\"serverPort\":" + DEFAULT_PORT + ",\"pin\":\"1234\",\"connectedTablets\":" + tablets + ",\"version\":\"" + VERSION + "\"}";
                         byte[] jsonBytes = Encoding.UTF8.GetBytes(json);
                         string jsonHeader = "HTTP/1.1 200 OK\r\n" +
                                             "Connection: close\r\n" +
@@ -2390,6 +2452,36 @@ namespace AirCanvas.Server
 
                 string type = ExtractJsonString(json, "type", "pointerMove");
 
+                if (type == "discovery_ping")
+                {
+                    if (stream != null)
+                    {
+                        long nowTs = DateTime.UtcNow.Ticks / 10000;
+                        string pIp = GetPrimaryLocalIp();
+                        string allIps = GetAllLocalIpsJsonArray();
+                        SendWsTextMessage(stream, "{\"type\":\"discovery_pong\",\"ip\":\"" + pIp + "\",\"allIps\":" + allIps + ",\"port\":" + DEFAULT_PORT + ",\"pin\":\"" + ActivePairingPin + "\",\"name\":\"" + Environment.MachineName + "\",\"platform\":\"windows\",\"timestamp\":" + nowTs + "}");
+                    }
+                    return;
+                }
+
+                if (type == "connect_request")
+                {
+                    if (stream != null)
+                    {
+                        long nowTs = DateTime.UtcNow.Ticks / 10000;
+                        int sw = Math.Max(64, TargetScreen != null ? TargetScreen.Width : 1920);
+                        int sh = Math.Max(64, TargetScreen != null ? TargetScreen.Height : 1080);
+                        SendWsTextMessage(stream, "{\"type\":\"connect_accept\",\"senderMode\":\"server\",\"pin\":\"" + ActivePairingPin + "\",\"timestamp\":" + nowTs + "}");
+                        SendWsTextMessage(stream, "{\"type\":\"screen_sync\",\"screenWidth\":" + sw + ",\"screenHeight\":" + sh + ",\"timestamp\":" + nowTs + "}");
+                    }
+                    return;
+                }
+
+                if (type == "register_host" || type == "room_joined" || type == "peer_connected" || type == "peer_disconnected" || type == "connect_accept")
+                {
+                    return;
+                }
+
                 if (type == "workArea" || type == "working_area")
                 {
                     string preset = ExtractJsonString(json, "preset", "auto");
@@ -2534,12 +2626,17 @@ namespace AirCanvas.Server
 
         public static void SendWsTextMessage(NetworkStream stream, string text)
         {
+            if (stream == null || string.IsNullOrEmpty(text)) return;
             try
             {
                 byte[] frame = BuildWsTextFrame(text);
                 if (frame != null)
                 {
-                    stream.Write(frame, 0, frame.Length);
+                    lock (_clientsLock)
+                    {
+                        stream.Write(frame, 0, frame.Length);
+                        stream.Flush();
+                    }
                 }
             }
             catch { }
@@ -2552,17 +2649,19 @@ namespace AirCanvas.Server
                 byte[] frame = BuildWsTextFrame(text);
                 if (frame == null) return;
 
-                List<NetworkStream> targets;
                 lock (_clientsLock)
                 {
-                    targets = new List<NetworkStream>(_activeClients);
-                }
-
-                foreach (var client in targets)
-                {
-                    if (client != senderStream)
+                    foreach (var client in _activeClients)
                     {
-                        try { client.Write(frame, 0, frame.Length); } catch { }
+                        if (client != senderStream)
+                        {
+                            try
+                            {
+                                client.Write(frame, 0, frame.Length);
+                                client.Flush();
+                            }
+                            catch { }
+                        }
                     }
                 }
             }
@@ -2576,17 +2675,19 @@ namespace AirCanvas.Server
                 byte[] frame = BuildWsBinaryFrame(payload);
                 if (frame == null) return;
 
-                List<NetworkStream> targets;
                 lock (_clientsLock)
                 {
-                    targets = new List<NetworkStream>(_activeClients);
-                }
-
-                foreach (var client in targets)
-                {
-                    if (client != senderStream)
+                    foreach (var client in _activeClients)
                     {
-                        try { client.Write(frame, 0, frame.Length); } catch { }
+                        if (client != senderStream)
+                        {
+                            try
+                            {
+                                client.Write(frame, 0, frame.Length);
+                                client.Flush();
+                            }
+                            catch { }
+                        }
                     }
                 }
             }
@@ -2595,13 +2696,19 @@ namespace AirCanvas.Server
 
         private static void SendPong(NetworkStream stream, byte[] payload)
         {
+            if (stream == null) return;
             try
             {
-                byte[] frame = new byte[payload.Length + 2];
+                byte[] data = payload ?? new byte[0];
+                byte[] frame = new byte[data.Length + 2];
                 frame[0] = 0x8A;
-                frame[1] = (byte)payload.Length;
-                Buffer.BlockCopy(payload, 0, frame, 2, payload.Length);
-                stream.Write(frame, 0, frame.Length);
+                frame[1] = (byte)data.Length;
+                Buffer.BlockCopy(data, 0, frame, 2, data.Length);
+                lock (_clientsLock)
+                {
+                    stream.Write(frame, 0, frame.Length);
+                    stream.Flush();
+                }
             }
             catch { }
         }

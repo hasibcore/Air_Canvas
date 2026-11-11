@@ -1,6 +1,6 @@
 // ==============================================================================
 // AirCanvasDesktop.cs
-// Standalone Windows GUI Desktop Application & Local Asset Server (v2.0.9 PRO)
+// Standalone Windows GUI Desktop Application & Local Asset Server (v2.1.0 PRO)
 // Native Pen Injector + Built-in WinForms Host Window + Embedded HTTP/WS Server
 // ==============================================================================
 
@@ -77,7 +77,7 @@ namespace AirCanvas
             {
                 MessageBox.Show(
                     "Error launching Air Canvas: " + ex.Message,
-                    "Air Canvas v2.0.8",
+                    "Air Canvas v2.1.0",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error
                 );
@@ -300,18 +300,15 @@ namespace AirCanvas
                 client.NoDelay = true;
                 stream = client.GetStream();
 
-                byte[] buffer = new byte[8192];
-                int bytesRead = stream.Read(buffer, 0, buffer.Length);
-                if (bytesRead <= 0)
+                string requestText = AirCanvasServer.ReadHttpHeader(stream);
+                if (string.IsNullOrEmpty(requestText))
                 {
                     try { client.Close(); } catch { }
                     return;
                 }
 
-                string requestText = Encoding.UTF8.GetString(buffer, 0, bytesRead);
-
                 // Support WebSocket connections directly on the Desktop HTTP Port (3005) as well as Port 9090
-                if (requestText.IndexOf("Upgrade: websocket", StringComparison.OrdinalIgnoreCase) >= 0)
+                if (requestText.IndexOf("upgrade: websocket", StringComparison.OrdinalIgnoreCase) >= 0)
                 {
                     AirCanvasServer.HandleWebSocketStream(client, stream, requestText);
                     return;

@@ -20,7 +20,7 @@ class AirCanvasApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Air Canvas v2.0.9',
+      title: 'Air Canvas v2.1.0',
       debugShowCheckedModeBanner: false,
       theme: ThemeData.dark().copyWith(
         scaffoldBackgroundColor: const Color(0xFF0A0A14),
@@ -289,31 +289,57 @@ class NetworkConnectionManager extends ChangeNotifier {
       final msg = utf8.decode(dg.data).trim();
       final Map<String, dynamic> data = jsonDecode(msg);
       if (data['app'] == 'AirCanvas') {
-        String ip = dg.address.address;
+        String ip = dg.address.address.replaceFirst('::ffff:', '').trim();
         if ((ip.isEmpty || ip == '0.0.0.0') && data['ip'] is String) {
-          ip = data['ip'] as String;
+          ip = (data['ip'] as String).trim();
         }
         final int port = (data['port'] is int) ? (data['port'] as int) : 9090;
-        final String name = (data['name'] is String && (data['name'] as String).isNotEmpty)
-            ? '${data['name']} ($ip)'
-            : 'Windows PC ($ip)';
+        final String rawName = (data['name'] is String && (data['name'] as String).isNotEmpty)
+            ? (data['name'] as String)
+            : 'Windows PC';
 
+        final List<String> candidateIps = [];
         if (ip.isNotEmpty && ip != '0.0.0.0' && ip != '127.0.0.1') {
-          detectedSubnetHint = ip;
-          if (!discoveredDevices.any((d) => d.ip == ip)) {
+          candidateIps.add(ip);
+        }
+        if (data['allIps'] is List) {
+          for (final item in (data['allIps'] as List)) {
+            if (item is String) {
+              final s = item.trim();
+              if (s.isNotEmpty && s != '0.0.0.0' && s != '127.0.0.1' && !candidateIps.contains(s)) {
+                candidateIps.add(s);
+              }
+            }
+          }
+        }
+
+        for (final candIp in candidateIps) {
+          detectedSubnetHint = candIp;
+          if (!discoveredDevices.any((d) => d.ip == candIp)) {
             discoveredDevices.insert(
               0,
               DiscoveredPC(
-                name: name,
-                ip: ip,
+                name: '$rawName ($candIp)',
+                ip: candIp,
                 port: port,
                 latencyMs: 2,
               ),
             );
-            notifyListeners();
           }
-          if (autoConnect && (_socket == null || activeTransport == 'cloud') && !isConnecting) {
-            connect(ip, port, pin: pairingPin);
+        }
+        if (candidateIps.isNotEmpty) {
+          notifyListeners();
+          final String primaryLanIp = candidateIps.first;
+          if (autoConnect && (_socket == null || activeTransport == 'cloud')) {
+            if (!isConnecting) {
+              connect(primaryLanIp, port, pin: pairingPin);
+            } else {
+              Future.delayed(const Duration(milliseconds: 650), () {
+                if (!_manualDisconnect && (_socket == null || activeTransport == 'cloud')) {
+                  _tryUpgradeToDirectLan(primaryLanIp, port);
+                }
+              });
+            }
           }
         }
       }
@@ -334,11 +360,11 @@ class NetworkConnectionManager extends ChangeNotifier {
 
     try {
       // 1. Check USB Cable (127.0.0.1:9090 and 127.0.0.1:3005) first for instant 1ms USB connection
-      await _probeHost('127.0.0.1', 9090, timeoutMs: 240);
+      await _probeHost('127.0.0.1', 9090, timeoutMs: 260);
       if (discoveredDevices.isEmpty) {
         await _probeHost('127.0.0.1', 3005, timeoutMs: 220);
       }
-      if (autoConnect && discoveredDevices.isNotEmpty && _socket == null && !isConnecting) {
+      if (autoConnect && discoveredDevices.isNotEmpty && (_socket == null || activeTransport == 'cloud') && !isConnecting) {
         final firstUsb = discoveredDevices.first;
         isScanning = false;
         notifyListeners();
@@ -346,8 +372,10 @@ class NetworkConnectionManager extends ChangeNotifier {
         return;
       }
 
-      // 2. Open UDP discovery socket & broadcast DISCOVERY_PING across all Wi-Fi subnets
-      _udpSocket?.close();
+      // 2. Open UDP discovery socket & broadcast DISCOVERY_PING across all Wi-Fi & USB Tethering subnets
+      try {
+        _udpSocket?.close();
+      } catch (_) {}
       _udpSocket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
       _udpSocket!.broadcastEnabled = true;
 
@@ -381,8 +409,11 @@ class NetworkConnectionManager extends ChangeNotifier {
         }
       }
 
-      // Fast UDP broadcast pings (2 rounds x 110ms)
-      for (int attempt = 0; attempt < 2; attempt++) {
+      // Start background TCP port 9090 subnet scan immediately in parallel with UDP broadcast!
+      _scanLanSubnetsInBackground(subnets, ownIps, autoConnect: autoConnect);
+
+      // Fast UDP broadcast pings (3 rounds x 130ms = 390ms)
+      for (int attempt = 0; attempt < 3; attempt++) {
         try {
           _udpSocket?.send(probe, InternetAddress('255.255.255.255'), 9091);
         } catch (_) {}
@@ -391,9 +422,9 @@ class NetworkConnectionManager extends ChangeNotifier {
             _udpSocket?.send(probe, InternetAddress('$subnet.255'), 9091);
           } catch (_) {}
         }
-        await Future.delayed(const Duration(milliseconds: 110));
-        if (discoveredDevices.isNotEmpty && autoConnect && (_socket != null || isConnecting)) {
-          return;
+        await Future.delayed(const Duration(milliseconds: 130));
+        if (discoveredDevices.isNotEmpty && autoConnect) {
+          break;
         }
       }
 
@@ -412,10 +443,6 @@ class NetworkConnectionManager extends ChangeNotifier {
         notifyListeners();
         await connect('relay', 443, pin: pairingPin);
       }
-
-      // 4. Continue scanning local LAN TCP port 9090 in the background; if a direct LAN PC is open,
-      // add it to discoveredDevices and seamlessly upgrade from Cloud Relay to 1ms Direct LAN!
-      _scanLanSubnetsInBackground(subnets, ownIps, autoConnect: autoConnect);
     } catch (e) {
       lastError = '';
       if (autoConnect && _socket == null && !isConnecting) {
@@ -444,12 +471,12 @@ class NetworkConnectionManager extends ChangeNotifier {
     bool autoConnect = true,
   }) async {
     final List<int> hostOrder = [
-      for (int i = 100; i <= 135; i++) i,
+      1,
+      for (int i = 100; i <= 145; i++) i,
       for (int i = 2; i <= 55; i++) i,
       for (int i = 56; i <= 99; i++) i,
-      for (int i = 136; i <= 199; i++) i,
+      for (int i = 146; i <= 199; i++) i,
       for (int i = 200; i <= 254; i++) i,
-      1,
     ];
 
     for (final subnet in subnets) {
@@ -484,7 +511,7 @@ class NetworkConnectionManager extends ChangeNotifier {
     try {
       final testSock = await WebSocket.connect(
         'ws://$lanIp:$lanPort/aircanvas?pin=$pairingPin&role=client&name=Android-APK&transport=wifi',
-      ).timeout(const Duration(milliseconds: 850));
+      ).timeout(const Duration(milliseconds: 950));
       await testSock.close();
       await connect(lanIp, lanPort, pin: pairingPin);
     } catch (_) {
@@ -554,12 +581,13 @@ class NetworkConnectionManager extends ChangeNotifier {
     pairingPin = cleanPin;
     _manualDisconnect = false;
     _reconnectTimer?.cancel();
-
-    await disconnect(manual: false);
     isConnecting = true;
     lastError = '';
     statusMessage = 'Connecting to PC ($cleanIp:$targetPort)...';
     notifyListeners();
+
+    await disconnect(manual: false);
+    isConnecting = true;
 
     final bool isCloudRelayTarget = cleanIp.toLowerCase() == 'relay' ||
         cleanIp.toLowerCase() == 'cloud' ||
@@ -574,11 +602,24 @@ class NetworkConnectionManager extends ChangeNotifier {
     final List<Map<String, String>> candidates = [];
 
     if (isCloudRelayTarget) {
+      // Even when connecting via Cloud Relay, if a local LAN/USB PC was already discovered, try it first!
+      for (final d in discoveredDevices.take(2)) {
+        if (d.ip.isNotEmpty && d.ip != 'relay' && !d.ip.startsWith('PIN')) {
+          candidates.add({
+            'url': 'ws://${d.ip}:${d.port}/aircanvas?pin=$cleanPin&role=client&name=Android-APK&transport=${d.ip == '127.0.0.1' ? 'usb' : 'wifi'}',
+            'label': '${d.ip}:${d.port}',
+            'transport': d.ip == '127.0.0.1' ? 'usb' : 'wifi',
+            'ip': d.ip,
+            'timeout': '750',
+          });
+        }
+      }
       final String relayHost = cleanIp.contains('.run.app') ? cleanIp : kCloudRelayHost;
       candidates.add({
         'url': 'wss://$relayHost/ws?pin=$cleanPin&role=client&name=Android-APK&transport=cloud',
         'label': 'Auto-Bridge PIN $cleanPin',
         'transport': 'cloud',
+        'ip': 'PIN $cleanPin',
         'timeout': '2200',
       });
       if (relayHost != kDevRelayHost) {
@@ -586,6 +627,7 @@ class NetworkConnectionManager extends ChangeNotifier {
           'url': 'wss://$kDevRelayHost/ws?pin=$cleanPin&role=client&name=Android-APK&transport=cloud',
           'label': 'Auto-Bridge Dev PIN $cleanPin',
           'transport': 'cloud',
+          'ip': 'PIN $cleanPin',
           'timeout': '2200',
         });
       }
@@ -594,7 +636,8 @@ class NetworkConnectionManager extends ChangeNotifier {
         'url': 'ws://$cleanIp:$targetPort/aircanvas?pin=$cleanPin&role=client&name=Android-APK&transport=$transportTag',
         'label': '$cleanIp:$targetPort',
         'transport': transportTag,
-        'timeout': '900',
+        'ip': cleanIp,
+        'timeout': '950',
       });
 
       if (targetPort != 9090) {
@@ -602,6 +645,7 @@ class NetworkConnectionManager extends ChangeNotifier {
           'url': 'ws://$cleanIp:9090/aircanvas?pin=$cleanPin&role=client&name=Android-APK&transport=$transportTag',
           'label': '$cleanIp:9090',
           'transport': transportTag,
+          'ip': cleanIp,
           'timeout': '800',
         });
       }
@@ -610,6 +654,7 @@ class NetworkConnectionManager extends ChangeNotifier {
           'url': 'ws://$cleanIp:3005/ws?pin=$cleanPin&role=client&name=Android-APK&transport=$transportTag',
           'label': '$cleanIp:3005',
           'transport': transportTag,
+          'ip': cleanIp,
           'timeout': '800',
         });
       }
@@ -618,20 +663,47 @@ class NetworkConnectionManager extends ChangeNotifier {
           'url': 'ws://127.0.0.1:9090/aircanvas?pin=$cleanPin&role=client&name=Android-APK&transport=usb',
           'label': '127.0.0.1:9090 (USB)',
           'transport': 'usb',
+          'ip': '127.0.0.1',
           'timeout': '550',
         });
+      } else {
+        // When user taps USB (127.0.0.1), also try any discovered LAN / USB-Tethering PC IPs!
+        for (final d in discoveredDevices.take(2)) {
+          if (d.ip != '127.0.0.1' && d.ip != 'relay' && !d.ip.startsWith('PIN')) {
+            candidates.add({
+              'url': 'ws://${d.ip}:${d.port}/aircanvas?pin=$cleanPin&role=client&name=Android-APK&transport=usb',
+              'label': '${d.ip}:${d.port} (USB/LAN)',
+              'transport': 'usb',
+              'ip': d.ip,
+              'timeout': '850',
+            });
+          }
+        }
+        if (detectedSubnetHint.isNotEmpty &&
+            detectedSubnetHint != '127.0.0.1' &&
+            !detectedSubnetHint.startsWith('PIN')) {
+          candidates.add({
+            'url': 'ws://$detectedSubnetHint:9090/aircanvas?pin=$cleanPin&role=client&name=Android-APK&transport=usb',
+            'label': '$detectedSubnetHint:9090 (USB/LAN)',
+            'transport': 'usb',
+            'ip': detectedSubnetHint,
+            'timeout': '800',
+          });
+        }
       }
       // Automatic Cloud Relay PIN failover (both primary and dev relays) if LAN/USB sockets are blocked by firewall or AP isolation
       candidates.add({
         'url': 'wss://$kCloudRelayHost/ws?pin=$cleanPin&role=client&name=Android-APK&transport=cloud',
         'label': 'Auto-Bridge PIN $cleanPin',
         'transport': 'cloud',
+        'ip': 'PIN $cleanPin',
         'timeout': '2200',
       });
       candidates.add({
         'url': 'wss://$kDevRelayHost/ws?pin=$cleanPin&role=client&name=Android-APK&transport=cloud',
         'label': 'Auto-Bridge Dev PIN $cleanPin',
         'transport': 'cloud',
+        'ip': 'PIN $cleanPin',
         'timeout': '2200',
       });
     }
@@ -639,6 +711,7 @@ class NetworkConnectionManager extends ChangeNotifier {
     WebSocket? sock;
     String connectedLabel = '$cleanIp:$targetPort';
     String selectedTransport = transportTag;
+    String resolvedIp = isCloudRelayTarget ? 'PIN $cleanPin' : cleanIp;
 
     for (final cand in candidates) {
       try {
@@ -648,6 +721,7 @@ class NetworkConnectionManager extends ChangeNotifier {
         sock = await WebSocket.connect(cand['url']!).timeout(Duration(milliseconds: timeoutMs));
         connectedLabel = cand['label']!;
         selectedTransport = cand['transport']!;
+        resolvedIp = cand['ip'] ?? resolvedIp;
         break;
       } catch (_) {
         sock = null;
@@ -670,15 +744,18 @@ class NetworkConnectionManager extends ChangeNotifier {
 
     try {
       _socket = sock;
-      _socket!.pingInterval = const Duration(seconds: 2);
+      _socket!.pingInterval = const Duration(seconds: 15);
 
       isConnected = true;
       isConnecting = false;
       activeTransport = selectedTransport;
-      connectedIp = selectedTransport == 'cloud' ? 'PIN $cleanPin' : cleanIp;
+      connectedIp = resolvedIp;
       connectedPort = targetPort;
-      if (cleanIp != 'relay' && cleanIp != 'cloud' && cleanIp != '127.0.0.1') {
-        detectedSubnetHint = cleanIp;
+      if (resolvedIp != 'relay' &&
+          resolvedIp != 'cloud' &&
+          resolvedIp != '127.0.0.1' &&
+          !resolvedIp.startsWith('PIN')) {
+        detectedSubnetHint = resolvedIp;
       }
       latencyMs = selectedTransport == 'usb' ? 1 : (selectedTransport == 'wifi' ? 2 : 8);
       statusMessage = 'Connected ($connectedLabel) • 1:1 ${selectedPreset.shortLabel}';
@@ -713,7 +790,7 @@ class NetworkConnectionManager extends ChangeNotifier {
       } catch (_) {}
 
       // If connected via Cloud Relay, also open a mirror socket to the alternate relay host (ais-dev / ais-pre)
-      // so whichever URL or PC Host the user has open receives strokes & handshakes simultaneously!
+      // AND if a local LAN PC was discovered while connecting, upgrade to 1ms Direct LAN!
       if (selectedTransport == 'cloud') {
         final String altRelayHost = connectedLabel.contains('Dev') ? kCloudRelayHost : kDevRelayHost;
         _connectSecondaryRelayMirror(
@@ -721,6 +798,19 @@ class NetworkConnectionManager extends ChangeNotifier {
           handshakeJson,
           discPingJson,
         );
+        if (discoveredDevices.isNotEmpty) {
+          final lanPc = discoveredDevices.firstWhere(
+            (d) => d.ip != '127.0.0.1' && d.ip != 'relay' && !d.ip.startsWith('PIN'),
+            orElse: () => discoveredDevices.first,
+          );
+          if (lanPc.ip != 'relay' && !lanPc.ip.startsWith('PIN')) {
+            Future.delayed(const Duration(milliseconds: 300), () {
+              if (!_manualDisconnect && activeTransport == 'cloud') {
+                _tryUpgradeToDirectLan(lanPc.ip, lanPc.port);
+              }
+            });
+          }
+        }
       }
 
       syncWorkingAreaToPC();
@@ -773,7 +863,7 @@ class NetworkConnectionManager extends ChangeNotifier {
     _secondaryRelaySocket = null;
     try {
       final sec = await WebSocket.connect(mirrorUrl).timeout(const Duration(milliseconds: 2500));
-      sec.pingInterval = const Duration(seconds: 2);
+      sec.pingInterval = const Duration(seconds: 15);
       _secondaryRelaySocket = sec;
       try {
         sec.add(handshakeJson);
@@ -904,12 +994,12 @@ class NetworkConnectionManager extends ChangeNotifier {
     if (manual) {
       _manualDisconnect = true;
       _reconnectTimer?.cancel();
+      try {
+        _udpSocket?.close();
+      } catch (_) {}
+      _udpSocket = null;
     }
     _pingTimer?.cancel();
-    try {
-      _udpSocket?.close();
-    } catch (_) {}
-    _udpSocket = null;
     try {
       await _secondaryRelaySocket?.close();
     } catch (_) {}
@@ -918,10 +1008,12 @@ class NetworkConnectionManager extends ChangeNotifier {
       await _socket?.close();
     } catch (_) {}
     _socket = null;
-    isConnected = false;
-    isConnecting = false;
-    statusMessage = 'Disconnected';
-    notifyListeners();
+    if (manual) {
+      isConnected = false;
+      isConnecting = false;
+      statusMessage = 'Disconnected';
+      notifyListeners();
+    }
   }
 
   /// Encodes a 13-byte little-endian binary pointer frame per Appendix A.1 spec:
@@ -2150,7 +2242,7 @@ class _ConnectionSetupViewState extends State<ConnectionSetupView> {
       appBar: AppBar(
         backgroundColor: const Color(0xFF121222),
         title: const Text(
-          'Air Canvas v2.0.9 — Connect & PC Working Area',
+          'Air Canvas v2.1.0 — Connect & PC Working Area',
           style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
         ),
         actions: [
