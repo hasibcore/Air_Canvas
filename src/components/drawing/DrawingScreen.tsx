@@ -916,14 +916,14 @@ export const DrawingScreen: React.FC<DrawingScreenProps> = ({
         {toolbarDock === 'bottom' && renderToolbarDock()}
       </footer>
 
-      {/* Quick Pair PIN Modal */}
+      {/* Quick Pair Modal (Same Wi-Fi + USB + Cloud PIN) */}
       {showPairModal && (
         <div className="fixed inset-0 z-50 grid place-items-center p-4 bg-slate-950/80 backdrop-blur-sm">
           <div className="bg-slate-900 border border-slate-800 rounded-2xl w-full max-w-xs p-5 shadow-2xl space-y-4">
             <div className="flex items-center justify-between">
               <h3 className="text-sm font-bold text-white flex items-center gap-2">
                 <Zap className="w-4 h-4 text-cyan-400" />
-                <span>Pair with PC</span>
+                <span>Pair with PC (Wi-Fi / USB / PIN)</span>
               </h3>
               <button
                 type="button"
@@ -935,6 +935,52 @@ export const DrawingScreen: React.FC<DrawingScreenProps> = ({
             </div>
 
             <div className="space-y-3">
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  disabled={isPairing}
+                  onClick={async () => {
+                    setIsPairing(true);
+                    const targetIp =
+                      connection.localIp && !connection.localIp.startsWith('PIN') && connection.localIp !== 'relay'
+                        ? connection.localIp
+                        : '192.168.1.100';
+                    const success = await connection.connectToServer(
+                      targetIp,
+                      connection.serverPort || 9090,
+                      pairPin || '1234',
+                      'wifi'
+                    );
+                    setIsPairing(false);
+                    if (success) setShowPairModal(false);
+                  }}
+                  className="py-2 px-2.5 bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/40 text-emerald-300 font-bold text-[11px] rounded-xl transition-all flex items-center justify-center gap-1.5 disabled:opacity-50"
+                >
+                  <Laptop className="w-3.5 h-3.5" />
+                  <span>Same Wi-Fi</span>
+                </button>
+
+                <button
+                  type="button"
+                  disabled={isPairing}
+                  onClick={async () => {
+                    setIsPairing(true);
+                    const success = await connection.connectToServer(
+                      '127.0.0.1',
+                      9090,
+                      pairPin || '1234',
+                      'usb'
+                    );
+                    setIsPairing(false);
+                    if (success) setShowPairModal(false);
+                  }}
+                  className="py-2 px-2.5 bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/40 text-cyan-300 font-bold text-[11px] rounded-xl transition-all flex items-center justify-center gap-1.5 disabled:opacity-50"
+                >
+                  <Smartphone className="w-3.5 h-3.5" />
+                  <span>USB (127.0.0.1)</span>
+                </button>
+              </div>
+
               <input
                 type="text"
                 maxLength={6}
@@ -963,7 +1009,7 @@ export const DrawingScreen: React.FC<DrawingScreenProps> = ({
                 className="w-full py-2.5 bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-xs rounded-xl shadow-lg transition-all flex items-center justify-center gap-2 disabled:opacity-50"
               >
                 <Zap className="w-4 h-4" />
-                <span>{isPairing ? 'Connecting...' : 'Connect Now'}</span>
+                <span>{isPairing ? 'Connecting...' : 'Connect via PIN'}</span>
               </button>
             </div>
           </div>

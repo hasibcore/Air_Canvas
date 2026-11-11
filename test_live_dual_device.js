@@ -634,16 +634,126 @@ async function runFourStageIntegrationTest() {
     usbWs.send(strokeBuf, { binary: true });
 
     await waitFor(() => tcpReceivedStrokes.length === 1);
+    console.log(
+      '  [PASS] Stage 6: PC Server + Mobile APK Same Wi-Fi (UDP 9091 + Split-Packet WS 101) & USB (127.0.0.1 + 13B Stroke) verified.'
+    );
+
+    // --------------------------------------------------------------------------
+    // STAGE 7: LIVE MULTI-STROKE DRAWING (32-PT CIRCLE, PRESSURE CURVE, ERASER & WEB STUDIO WINDOW DETECTION)
+    // --------------------------------------------------------------------------
+    console.log('\n--- Stage 7: Live Multi-Stroke Drawing (Circle Invariance, Pressure Curve, Eraser & Window Bounds) ---');
+
+    const engineCode = fs.readFileSync(path.join(__dirname, 'src', 'services', 'drawingEngine.ts'), 'utf8');
+    if (csCode.includes('title.Contains("air canvas")')) {
+      throw new Error('AirCanvasServer.cs still excludes Chrome/Edge windows with "air canvas" in title');
+    }
+    if (!csCode.includes('_hasSentSyntheticNewFlag') || !csCode.includes('string eventSource = json;')) {
+      throw new Error('AirCanvasServer.cs missing POINTER_FLAG_NEW tracking or nested eventSource slice');
+    }
+    if (!dartCode.includes('stroke.strokeWidth * (0.45 + avgP * 0.85)')) {
+      throw new Error('lib/main.dart missing pressure-modulated C1 quadratic Bézier stroke rendering');
+    }
+    if (!engineCode.includes('const spanW = Math.max(1, w - 1);')) {
+      throw new Error('drawingEngine.ts exportAsImage missing spanW = Math.max(1, w - 1)');
+    }
+
+    // Stream a 32-point pressure-varied circle (radius = 300px on a 1920x1080 aspect-matched pad) + 3-point Eraser stroke
+    tcpReceivedStrokes.length = 0;
+    const circlePointsCount = 32;
+    const padW = 1920;
+    const padH = 1080;
+    const centerX = (padW - 1) / 2;
+    const centerY = (padH - 1) / 2;
+    const radiusPx = 300;
+
+    for (let i = 0; i <= circlePointsCount; i++) {
+      const theta = (2 * Math.PI * i) / circlePointsCount;
+      const sx = centerX + radiusPx * Math.cos(theta);
+      const sy = centerY + radiusPx * Math.sin(theta);
+      const normX = sx / (padW - 1);
+      const normY = sy / (padH - 1);
+      const evType = i === 0 ? 0 : i === circlePointsCount ? 2 : 1;
+      const pressureFloat = evType === 2 ? 0.0 : 0.2 + 0.8 * Math.sin((Math.PI * i) / circlePointsCount);
+
+      const frame = Buffer.alloc(13);
+      frame.writeUInt8(evType, 0);
+      frame.writeUInt16LE(Math.floor(normX * 65535 + 0.5), 1);
+      frame.writeUInt16LE(Math.floor(normY * 65535 + 0.5), 3);
+      frame.writeUInt16LE(evType === 2 ? 0 : Math.max(1, Math.min(1024, Math.floor(pressureFloat * 1024 + 0.5))), 5);
+      frame.writeUInt8(0, 7); // Pen
+      frame.writeUInt32LE(5000 + i * 4, 8);
+      frame.writeUInt8(1, 12);
+      usbWs.send(frame, { binary: true });
+    }
+
+    // Follow with a 3-point Eraser stroke across the center
+    const eraserNorms = [
+      { type: 0, nx: 0.4, ny: 0.5, p: 800 },
+      { type: 1, nx: 0.5, ny: 0.5, p: 950 },
+      { type: 2, nx: 0.6, ny: 0.5, p: 0 },
+    ];
+    for (let i = 0; i < eraserNorms.length; i++) {
+      const e = eraserNorms[i];
+      const frame = Buffer.alloc(13);
+      frame.writeUInt8(e.type, 0);
+      frame.writeUInt16LE(Math.floor(e.nx * 65535 + 0.5), 1);
+      frame.writeUInt16LE(Math.floor(e.ny * 65535 + 0.5), 3);
+      frame.writeUInt16LE(e.p, 5);
+      frame.writeUInt8(1, 7); // Eraser tool = 1
+      frame.writeUInt32LE(6000 + i * 4, 8);
+      frame.writeUInt8(1, 12);
+      usbWs.send(frame, { binary: true });
+    }
+
+    const expectedTotalFrames = circlePointsCount + 1 + eraserNorms.length;
+    await waitFor(() => tcpReceivedStrokes.length === expectedTotalFrames);
+
+    // Reconstruct projected PC screen pixels for the 32-point circle and verify diameter invariance (diamX == diamY within <= 1px)
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minY = Infinity;
+    let maxY = -Infinity;
+    let maxPressureSeen = 0;
+
+    for (let i = 0; i <= circlePointsCount; i++) {
+      const f = tcpReceivedStrokes[i];
+      const nx = f.readUInt16LE(1) / 65535.0;
+      const ny = f.readUInt16LE(3) / 65535.0;
+      const p = f.readUInt16LE(5);
+      const px = Math.floor(nx * (padW - 1) + 0.5);
+      const py = Math.floor(ny * (padH - 1) + 0.5);
+      if (px < minX) minX = px;
+      if (px > maxX) maxX = px;
+      if (py < minY) minY = py;
+      if (py > maxY) maxY = py;
+      if (p > maxPressureSeen) maxPressureSeen = p;
+    }
+
+    const diamX = maxX - minX;
+    const diamY = maxY - minY;
+    if (Math.abs(diamX - 600) > 1 || Math.abs(diamY - 600) > 1 || Math.abs(diamX - diamY) > 1) {
+      throw new Error(`Circle drawing distortion: diamX=${diamX}, diamY=${diamY} (expected 600x600)`);
+    }
+    if (maxPressureSeen < 1000 || tcpReceivedStrokes[circlePointsCount].readUInt16LE(5) !== 0) {
+      throw new Error(`Pressure curve mismatch: maxPressure=${maxPressureSeen}`);
+    }
+
+    // Verify Eraser frames arrived with tool=1
+    const eraserFrames = tcpReceivedStrokes.slice(circlePointsCount + 1);
+    if (eraserFrames.length !== 3 || !eraserFrames.every((ef) => ef.readUInt8(7) === 1)) {
+      throw new Error('Eraser stroke frames did not preserve tool=1');
+    }
+
     usbWs.close();
     udpServer.close();
     pcTcpServer.close();
 
     console.log(
-      '  [PASS] Stage 6: PC Server + Mobile APK Same Wi-Fi (UDP 9091 + Split-Packet WS 101) & USB (127.0.0.1 + 13B Stroke) verified.'
+      `  [PASS] Stage 7: Live 32-pt Circle (diamX=${diamX}px, diamY=${diamY}px, peakPressure=${maxPressureSeen}/1024) + Eraser stroke verified with 0 px distortion.`
     );
 
     console.log('\n================================================================');
-    console.log('RESULT: ALL 6 LOOPBACK & DUAL-DEVICE STAGES PASSED (v2.1.0)');
+    console.log('RESULT: ALL 7 LOOPBACK, DUAL-DEVICE & LIVE DRAWING STAGES PASSED (v2.1.1)');
     console.log('================================================================\n');
   } finally {
     wss.close();

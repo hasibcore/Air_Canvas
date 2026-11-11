@@ -20,7 +20,7 @@ class AirCanvasApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Air Canvas v2.1.0',
+      title: 'Air Canvas v2.1.1',
       debugShowCheckedModeBanner: false,
       theme: ThemeData.dark().copyWith(
         scaffoldBackgroundColor: const Color(0xFF0A0A14),
@@ -1560,8 +1560,8 @@ class _DrawingTabletPadViewState extends State<DrawingTabletPadView> with Widget
       setState(() {
         _redoStack.add(_strokes.removeLast());
       });
-      widget.net.sendCanvasAction('undo');
     }
+    widget.net.sendCanvasAction('undo');
   }
 
   void _redo() {
@@ -1569,8 +1569,8 @@ class _DrawingTabletPadViewState extends State<DrawingTabletPadView> with Widget
       setState(() {
         _strokes.add(_redoStack.removeLast());
       });
-      widget.net.sendCanvasAction('redo');
     }
+    widget.net.sendCanvasAction('redo');
   }
 
   void _clearCanvas() {
@@ -2119,28 +2119,78 @@ class TabletCanvasPainter extends CustomPainter {
       }
 
       if (stroke.points.length == 1) {
-        final p = _mapNormalizedToCanvas(stroke.points.first.offset);
+        final pt = stroke.points.first;
+        final p = _mapNormalizedToCanvas(pt.offset);
+        final double widthMod = isEraser ? 1.0 : (0.45 + pt.pressure.clamp(0.1, 1.0) * 0.85);
         final dotPaint = Paint()
           ..color = isEraser ? const Color(0xFFFFFFFF) : stroke.color
           ..blendMode = isEraser ? BlendMode.clear : BlendMode.srcOver;
-        canvas.drawCircle(p, stroke.strokeWidth / 2, dotPaint);
+        if (stroke.tool == ToolType.laser) {
+          dotPaint.maskFilter = const MaskFilter.blur(BlurStyle.normal, 4);
+        }
+        canvas.drawCircle(p, (stroke.strokeWidth * widthMod) / 2, dotPaint);
         continue;
       }
 
-      final path = Path();
-      final first = _mapNormalizedToCanvas(stroke.points.first.offset);
-      path.moveTo(first.dx, first.dy);
-
-      for (int i = 1; i < stroke.points.length - 1; i++) {
-        final p0 = _mapNormalizedToCanvas(stroke.points[i].offset);
-        final p1 = _mapNormalizedToCanvas(stroke.points[i + 1].offset);
-        final mid = Offset((p0.dx + p1.dx) / 2, (p0.dy + p1.dy) / 2);
-        path.quadraticBezierTo(p0.dx, p0.dy, mid.dx, mid.dy);
+      if (stroke.points.length == 2) {
+        final p0 = _mapNormalizedToCanvas(stroke.points[0].offset);
+        final p1 = _mapNormalizedToCanvas(stroke.points[1].offset);
+        final double avgPressure = ((stroke.points[0].pressure + stroke.points[1].pressure) * 0.5).clamp(0.1, 1.0);
+        paint.strokeWidth = isEraser ? stroke.strokeWidth : stroke.strokeWidth * (0.45 + avgPressure * 0.85);
+        canvas.drawLine(p0, p1, paint);
+        continue;
       }
 
-      final last = _mapNormalizedToCanvas(stroke.points.last.offset);
-      path.lineTo(last.dx, last.dy);
-      canvas.drawPath(path, paint);
+      if (stroke.tool == ToolType.pen) {
+        // Pressure-sensitive C1 midpoint quadratic Bézier sub-segments for Pen mode
+        final p0 = _mapNormalizedToCanvas(stroke.points[0].offset);
+        final p1 = _mapNormalizedToCanvas(stroke.points[1].offset);
+        final mid01 = Offset((p0.dx + p1.dx) * 0.5, (p0.dy + p1.dy) * 0.5);
+        final double pInit = ((stroke.points[0].pressure + stroke.points[1].pressure) * 0.5).clamp(0.1, 1.0);
+        paint.strokeWidth = stroke.strokeWidth * (0.45 + pInit * 0.85);
+        canvas.drawLine(p0, mid01, paint);
+
+        for (int i = 1; i < stroke.points.length - 1; i++) {
+          final prev = _mapNormalizedToCanvas(stroke.points[i - 1].offset);
+          final curr = _mapNormalizedToCanvas(stroke.points[i].offset);
+          final next = _mapNormalizedToCanvas(stroke.points[i + 1].offset);
+          final startMid = Offset((prev.dx + curr.dx) * 0.5, (prev.dy + curr.dy) * 0.5);
+          final endMid = Offset((curr.dx + next.dx) * 0.5, (curr.dy + next.dy) * 0.5);
+          final double avgP = ((stroke.points[i - 1].pressure + stroke.points[i].pressure + stroke.points[i + 1].pressure) / 3.0)
+              .clamp(0.1, 1.0);
+          paint.strokeWidth = stroke.strokeWidth * (0.45 + avgP * 0.85);
+          final segPath = Path()
+            ..moveTo(startMid.dx, startMid.dy)
+            ..quadraticBezierTo(curr.dx, curr.dy, endMid.dx, endMid.dy);
+          canvas.drawPath(segPath, paint);
+        }
+
+        final lastPrev = _mapNormalizedToCanvas(stroke.points[stroke.points.length - 2].offset);
+        final last = _mapNormalizedToCanvas(stroke.points.last.offset);
+        final lastMid = Offset((lastPrev.dx + last.dx) * 0.5, (lastPrev.dy + last.dy) * 0.5);
+        final double pEnd = ((stroke.points[stroke.points.length - 2].pressure + stroke.points.last.pressure) * 0.5).clamp(0.1, 1.0);
+        paint.strokeWidth = stroke.strokeWidth * (0.45 + pEnd * 0.85);
+        canvas.drawLine(lastMid, last, paint);
+      } else {
+        // Unified C1 quadratic Bézier path for Eraser (BlendMode.clear) & Laser
+        final path = Path();
+        final p0 = _mapNormalizedToCanvas(stroke.points[0].offset);
+        final p1 = _mapNormalizedToCanvas(stroke.points[1].offset);
+        final mid01 = Offset((p0.dx + p1.dx) * 0.5, (p0.dy + p1.dy) * 0.5);
+        path.moveTo(p0.dx, p0.dy);
+        path.lineTo(mid01.dx, mid01.dy);
+
+        for (int i = 1; i < stroke.points.length - 1; i++) {
+          final curr = _mapNormalizedToCanvas(stroke.points[i].offset);
+          final next = _mapNormalizedToCanvas(stroke.points[i + 1].offset);
+          final mid = Offset((curr.dx + next.dx) * 0.5, (curr.dy + next.dy) * 0.5);
+          path.quadraticBezierTo(curr.dx, curr.dy, mid.dx, mid.dy);
+        }
+
+        final last = _mapNormalizedToCanvas(stroke.points.last.offset);
+        path.lineTo(last.dx, last.dy);
+        canvas.drawPath(path, paint);
+      }
     }
     canvas.restore();
 
@@ -2242,7 +2292,7 @@ class _ConnectionSetupViewState extends State<ConnectionSetupView> {
       appBar: AppBar(
         backgroundColor: const Color(0xFF121222),
         title: const Text(
-          'Air Canvas v2.1.0 — Connect & PC Working Area',
+          'Air Canvas v2.1.1 — Connect & PC Working Area',
           style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
         ),
         actions: [

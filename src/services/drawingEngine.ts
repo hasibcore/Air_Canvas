@@ -1355,10 +1355,13 @@ export class DrawingEngine {
       const pts = stroke.points;
       if (pts.length === 0) continue;
 
-      const getX = (p: (typeof pts)[0]) => (p.normX !== undefined ? p.normX * w : p.x);
-      const getY = (p: (typeof pts)[0]) => (p.normY !== undefined ? p.normY * h : p.y);
+      const spanW = Math.max(1, w - 1);
+      const spanH = Math.max(1, h - 1);
+      const getX = (p: (typeof pts)[0]) => (p.normX !== undefined ? p.normX * spanW : p.x);
+      const getY = (p: (typeof pts)[0]) => (p.normY !== undefined ? p.normY * spanH : p.y);
 
-      const isEraser = stroke.settings.mode === 'eraser';
+      const isEraser =
+        stroke.settings.mode === 'eraser' || pts.some((p) => p.pointerType === 'eraser');
       const isHighlighter = stroke.settings.mode === 'highlighter';
 
       inkCtx.save();
@@ -1421,7 +1424,7 @@ export class DrawingEngine {
         const endX = (getX(curr) + getX(next)) / 2;
         const endY = (getY(curr) + getY(next)) / 2;
 
-        inkCtx.lineWidth = Math.max(0.8, curr.width);
+        inkCtx.lineWidth = Math.max(0.8, (prev.width + curr.width + next.width) / 3);
         inkCtx.beginPath();
         inkCtx.moveTo(startX, startY);
         inkCtx.quadraticCurveTo(getX(curr), getY(curr), endX, endY);
@@ -1430,7 +1433,7 @@ export class DrawingEngine {
 
       const lastPrev = pts[pts.length - 2];
       const last = pts[pts.length - 1];
-      inkCtx.lineWidth = Math.max(0.8, last.width);
+      inkCtx.lineWidth = Math.max(0.8, (lastPrev.width + last.width) / 2);
       inkCtx.beginPath();
       inkCtx.moveTo((getX(lastPrev) + getX(last)) / 2, (getY(lastPrev) + getY(last)) / 2);
       inkCtx.lineTo(getX(last), getY(last));

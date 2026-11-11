@@ -182,11 +182,11 @@ const server = http.createServer((req, res) => {
         [
           'commit',
           '-m',
-          'Release AirCanvas v2.1.0 — Dual-Relay Cloud Auto-Bridge, 1:1 Ratio/Rotation & Zero-Lag Pen Injection',
+          'Release AirCanvas v2.1.1 — Dual-Relay Cloud Auto-Bridge, 1:1 Ratio/Rotation & Zero-Lag Pen Injection',
         ],
         { cwd: __dirname, shell: false, timeout: 10000 }
       );
-      spawnSync('git', ['tag', '-f', '-a', 'v2.1.0', '-m', 'Air Canvas v2.1.0 Release'], {
+      spawnSync('git', ['tag', '-f', '-a', 'v2.1.1', '-m', 'Air Canvas v2.1.1 Release'], {
         cwd: __dirname,
         shell: false,
         timeout: 10000,
@@ -197,7 +197,7 @@ const server = http.createServer((req, res) => {
         timeout: 25000,
         encoding: 'utf8',
       });
-      const pushTag = spawnSync('git', ['push', authRemote, 'refs/tags/v2.1.0:refs/tags/v2.1.0', '--force'], {
+      const pushTag = spawnSync('git', ['push', authRemote, 'refs/tags/v2.1.1:refs/tags/v2.1.1', '--force'], {
         cwd: __dirname,
         shell: false,
         timeout: 25000,
@@ -209,7 +209,7 @@ const server = http.createServer((req, res) => {
         res.end(
           JSON.stringify({
             ok: true,
-            message: `Successfully pushed branch main and tag v2.1.0 to https://github.com/${cleanSlug} (GitHub Actions release pipeline triggered for APK & EXE).`,
+            message: `Successfully pushed branch main and tag v2.1.1 to https://github.com/${cleanSlug} (GitHub Actions release pipeline triggered for APK & EXE).`,
           })
         );
       } else {

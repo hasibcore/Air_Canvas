@@ -1,6 +1,6 @@
 // ==============================================================================================
 // AirCanvasServer.cs - High-Performance Windows Native Input Server & Synthetic Pen Injector
-// Version: 2.0.7 PRO
+// Version: 2.1.1 PRO
 // Features:
 // - 100% Mobile Full-Screen Pad -> PC Software Working Area 1:1 Mapping
 // - Auto-Detect Active PC Software Window & Canvas Working Area (Photoshop, Krita, OneNote, etc.)
@@ -122,7 +122,7 @@ namespace AirCanvas.Server
 
     public class AirCanvasServer
     {
-        public const string VERSION = "2.1.0 PRO";
+        public const string VERSION = "2.1.1 PRO";
         public const int DEFAULT_PORT = 9090;
         public const int DISCOVERY_PORT = 9091;
         public const string CLOUD_RELAY_HOST = "ais-pre-2wmsbni7lh5hjxll4p27tc-851170313359.asia-northeast1.run.app";
@@ -391,6 +391,7 @@ namespace AirCanvas.Server
 
         public static IntPtr SyntheticPenDevice = IntPtr.Zero;
         public static bool IsSyntheticPenInitialized = false;
+        private static bool _hasSentSyntheticNewFlag = false;
 
         public static void InitializeSyntheticPen()
         {
@@ -700,7 +701,6 @@ namespace AirCanvas.Server
                         bool isSelfOrShellWindow =
                             fgPid == currentPid ||
                             procName.Contains("aircanvas") ||
-                            title.Contains("air canvas") ||
                             procName == "explorer" ||
                             procName == "searchhost" ||
                             procName == "shellexperiencehost" ||
@@ -1130,6 +1130,7 @@ namespace AirCanvas.Server
                         }
 
                         // Move pen in hover state to the new stroke start point BEFORE pressing down
+                        uint hoverFlag = _hasSentSyntheticNewFlag ? POINTER_FLAG_UPDATE : POINTER_FLAG_NEW;
                         var hoverMoveInfo = new POINTER_TYPE_INFO
                         {
                             type = PT_PEN,
@@ -1140,14 +1141,17 @@ namespace AirCanvas.Server
                                     pointerType = PT_PEN,
                                     pointerId = 1,
                                     ptPixelLocation = new POINT { X = target.X, Y = target.Y },
-                                    pointerFlags = POINTER_FLAG_PRIMARY | POINTER_FLAG_UPDATE | POINTER_FLAG_INRANGE,
+                                    pointerFlags = POINTER_FLAG_PRIMARY | hoverFlag | POINTER_FLAG_INRANGE,
                                 },
                                 penFlags = penFlags,
                                 penMask = 0x00000001,
                                 pressure = 0,
                             }
                         };
-                        InjectSyntheticPointerInput(SyntheticPenDevice, new[] { hoverMoveInfo }, 1);
+                        if (InjectSyntheticPointerInput(SyntheticPenDevice, new[] { hoverMoveInfo }, 1))
+                        {
+                            _hasSentSyntheticNewFlag = true;
+                        }
 
                         pointerFlags |= POINTER_FLAG_DOWN | POINTER_FLAG_INCONTACT | POINTER_FLAG_INRANGE | POINTER_FLAG_FIRSTBUTTON;
                         _lastStateWasHover = false;
@@ -1166,7 +1170,8 @@ namespace AirCanvas.Server
                     }
                     else // Hover
                     {
-                        pointerFlags |= POINTER_FLAG_UPDATE | POINTER_FLAG_INRANGE;
+                        uint hoverFlag = _hasSentSyntheticNewFlag ? POINTER_FLAG_UPDATE : POINTER_FLAG_NEW;
+                        pointerFlags |= hoverFlag | POINTER_FLAG_INRANGE;
                         _lastStateWasHover = true;
                         _isPenInContact = false;
                     }
@@ -1197,6 +1202,14 @@ namespace AirCanvas.Server
                     bool success = InjectSyntheticPointerInput(SyntheticPenDevice, new[] { penInfo }, 1);
                     if (success)
                     {
+                        _hasSentSyntheticNewFlag = true;
+                        if (eventType == "pointerHover")
+                        {
+                            if (!SetPhysicalCursorPos(target.X, target.Y))
+                            {
+                                SetCursorPos(target.X, target.Y);
+                            }
+                        }
                         if (logDiagnostic)
                         {
                             Console.WriteLine(
@@ -2522,11 +2535,17 @@ namespace AirCanvas.Server
                 }
 
                 // Resolve inner pointer event type when wrapped inside {"type":"input_event","payload":{...}} or {"type":"input_event","event":{...}}
+                string eventSource = json;
                 if (type == "input_event")
                 {
-                    if (json.Contains("\"pointerDown\"")) type = "pointerDown";
-                    else if (json.Contains("\"pointerUp\"") || json.Contains("\"pointerCancel\"")) type = "pointerUp";
-                    else if (json.Contains("\"pointerHover\"") || json.Contains("\"hover\"")) type = "pointerHover";
+                    int evIdx = json.IndexOf("\"event\"", StringComparison.Ordinal);
+                    if (evIdx >= 0)
+                    {
+                        eventSource = json.Substring(evIdx);
+                    }
+                    if (eventSource.Contains("\"pointerDown\"")) type = "pointerDown";
+                    else if (eventSource.Contains("\"pointerUp\"") || eventSource.Contains("\"pointerCancel\"")) type = "pointerUp";
+                    else if (eventSource.Contains("\"pointerHover\"") || eventSource.Contains("\"hover\"")) type = "pointerHover";
                     else type = "pointerMove";
                 }
                 else if (type == "hover")
@@ -2544,15 +2563,15 @@ namespace AirCanvas.Server
 
                 if (type == "pointerDown" || type == "pointerMove" || type == "pointerUp" || type == "pointerHover")
                 {
-                    double x = ExtractJsonDouble(json, "x", 0.5);
-                    double y = ExtractJsonDouble(json, "y", 0.5);
-                    double pressure = ExtractJsonDouble(json, "pressure", ExtractJsonDouble(json, "p", 0.5));
-                    string tool = ExtractJsonString(json, "tool", "");
+                    double x = ExtractJsonDouble(eventSource, "x", 0.5);
+                    double y = ExtractJsonDouble(eventSource, "y", 0.5);
+                    double pressure = ExtractJsonDouble(eventSource, "pressure", ExtractJsonDouble(eventSource, "p", 0.5));
+                    string tool = ExtractJsonString(eventSource, "tool", "");
                     if (string.IsNullOrEmpty(tool))
                     {
-                        string brushMode = ExtractJsonString(json, "brushMode", "");
-                        string pointerType = ExtractJsonString(json, "pointerType", "");
-                        double penFlags = ExtractJsonDouble(json, "penFlags", 0);
+                        string brushMode = ExtractJsonString(eventSource, "brushMode", "");
+                        string pointerType = ExtractJsonString(eventSource, "pointerType", "");
+                        double penFlags = ExtractJsonDouble(eventSource, "penFlags", 0);
                         if (brushMode == "eraser" || pointerType == "eraser" || ((int)penFlags & 6) != 0)
                         {
                             tool = "eraser";
