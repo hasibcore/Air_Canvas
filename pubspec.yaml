@@ -1,0 +1,14 @@
+name: aircanvas
+description: Air Canvas v2.1.2 - Full-Screen Wireless Graphics Tablet & 1:1 PC Software Working Area
+publish_to: 'none'
+version: 2.1.2+212
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+flutter:
+  uses-material-design: true

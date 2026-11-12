@@ -1,0 +1,8 @@
+{
+  "name": "Remix Air-Canvas",
+  "description": "Imported from GitHub",
+  "version": "1.7.9",
+  "capabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

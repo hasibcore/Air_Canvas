@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.aistudio/
+.env
+.DS_Store
+*.log
+!audit/logs/*.log
+

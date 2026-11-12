@@ -1,0 +1,215 @@
+{
+  "version": 1,
+  "valid": [
+    {
+      "id": "V1",
+      "description": "Down, center (0.5, 0.5), half pressure (0.5), pen, timestamp 1000",
+      "input": {
+        "type": 0,
+        "eventType": "pointerDown",
+        "normX": 0.5,
+        "normY": 0.5,
+        "pressure": 0.5,
+        "tool": 0,
+        "toolName": "pen",
+        "timestamp": 1000
+      },
+      "fields": {
+        "x": 32768,
+        "y": 32768,
+        "p": 512,
+        "version": 1
+      },
+      "hex": "00 00 80 00 80 00 02 00 E8 03 00 00 01"
+    },
+    {
+      "id": "V2",
+      "description": "Move, bottom-left (0.0, 1.0), full pressure (1.0), eraser, max uint32 timestamp",
+      "input": {
+        "type": 1,
+        "eventType": "pointerMove",
+        "normX": 0.0,
+        "normY": 1.0,
+        "pressure": 1.0,
+        "tool": 1,
+        "toolName": "eraser",
+        "timestamp": 4294967295
+      },
+      "fields": {
+        "x": 0,
+        "y": 65535,
+        "p": 1024,
+        "version": 1
+      },
+      "hex": "01 00 00 FF FF 00 04 01 FF FF FF FF 01"
+    },
+    {
+      "id": "V3",
+      "description": "Up, top-right (1.0, 0.0), zero pressure (0.0), laser, timestamp 0x12345678",
+      "input": {
+        "type": 2,
+        "eventType": "pointerUp",
+        "normX": 1.0,
+        "normY": 0.0,
+        "pressure": 0.0,
+        "tool": 2,
+        "toolName": "laser",
+        "timestamp": 305419896
+      },
+      "fields": {
+        "x": 65535,
+        "y": 0,
+        "p": 0,
+        "version": 1
+      },
+      "hex": "02 FF FF 00 00 00 00 02 78 56 34 12 01"
+    },
+    {
+      "id": "V4",
+      "description": "Hover, quarter point (0.25, 0.75), zero pressure (0.0), pen, timestamp 0",
+      "input": {
+        "type": 3,
+        "eventType": "pointerHover",
+        "normX": 0.25,
+        "normY": 0.75,
+        "pressure": 0.0,
+        "tool": 0,
+        "toolName": "pen",
+        "timestamp": 0
+      },
+      "fields": {
+        "x": 16384,
+        "y": 49151,
+        "p": 0,
+        "version": 1
+      },
+      "hex": "03 00 40 FF BF 00 00 00 00 00 00 00 01"
+    },
+    {
+      "id": "V5",
+      "description": "Out-of-range clamp test: Down, (-0.5, 1.5), pressure 2.0, pen, timestamp 5",
+      "input": {
+        "type": 0,
+        "eventType": "pointerDown",
+        "normX": -0.5,
+        "normY": 1.5,
+        "pressure": 2.0,
+        "tool": 0,
+        "toolName": "pen",
+        "timestamp": 5
+      },
+      "fields": {
+        "x": 0,
+        "y": 65535,
+        "p": 1024,
+        "version": 1
+      },
+      "hex": "00 00 00 FF FF 00 04 00 05 00 00 00 01"
+    }
+  ],
+  "rounding": [
+    {
+      "id": "R1",
+      "pressure": 0.00048828125,
+      "scaled": 0.5,
+      "expectedP": 1
+    },
+    {
+      "id": "R2",
+      "pressure": 0.00146484375,
+      "scaled": 1.5,
+      "expectedP": 2
+    },
+    {
+      "id": "R3",
+      "pressure": 0.00244140625,
+      "scaled": 2.5,
+      "expectedP": 3
+    },
+    {
+      "id": "R4",
+      "pressure": 0.00341796875,
+      "scaled": 3.5,
+      "expectedP": 4
+    }
+  ],
+  "malformed": [
+    {
+      "id": "M1",
+      "description": "Length 12 (truncated V1 without last byte)",
+      "hex": "00 00 80 00 80 00 02 00 E8 03 00 00",
+      "error": "BadLength"
+    },
+    {
+      "id": "M2",
+      "description": "Length 14 (V1 + trailing 00 byte)",
+      "hex": "00 00 80 00 80 00 02 00 E8 03 00 00 01 00",
+      "error": "BadLength"
+    },
+    {
+      "id": "M3",
+      "description": "Unsupported protocol version 2",
+      "hex": "00 00 80 00 80 00 02 00 E8 03 00 00 02",
+      "error": "BadVersion"
+    },
+    {
+      "id": "M4",
+      "description": "All-zero frame (protocol version 0)",
+      "hex": "00 00 00 00 00 00 00 00 00 00 00 00 00",
+      "error": "BadVersion"
+    },
+    {
+      "id": "M5",
+      "description": "Invalid tool ID (byte 7 = 03)",
+      "hex": "00 00 80 00 80 00 02 03 E8 03 00 00 01",
+      "error": "BadTool"
+    },
+    {
+      "id": "M6",
+      "description": "Invalid event type (byte 0 = 04)",
+      "hex": "04 00 80 00 80 00 02 00 E8 03 00 00 01",
+      "error": "BadEventType"
+    },
+    {
+      "id": "M7",
+      "description": "Empty 0-byte payload",
+      "hex": "",
+      "error": "BadLength"
+    }
+  ],
+  "projection": [
+    { "area": [0, 0, 1920, 1080], "norm": [0.5, 0.5], "expected": [960, 540] },
+    { "area": [0, 0, 1920, 1080], "norm": [0.0, 0.0], "expected": [0, 0] },
+    { "area": [0, 0, 1920, 1080], "norm": [1.0, 1.0], "expected": [1919, 1079] },
+    { "area": [0, 0, 1920, 1080], "norm": [1.0, 0.0], "expected": [1919, 0] },
+    { "area": [0, 0, 1920, 1080], "norm": [0.0, 1.0], "expected": [0, 1079] },
+    { "area": [0, 0, 1920, 1080], "norm": [0.5, 0.0], "expected": [960, 0] },
+    { "area": [0, 0, 1920, 1080], "norm": [0.0, 0.5], "expected": [0, 540] },
+    { "area": [0, 0, 1920, 1080], "norm": [0.25, 0.25], "expected": [480, 270] },
+    { "area": [0, 0, 1920, 1080], "norm": [0.75, 0.25], "expected": [1439, 270] },
+    { "area": [0, 0, 1920, 1080], "norm": [0.25, 0.75], "expected": [480, 809] },
+    { "area": [0, 0, 1920, 1080], "norm": [0.75, 0.75], "expected": [1439, 809] },
+    { "area": [-1920, 0, 1920, 1080], "norm": [0.0, 0.0], "expected": [-1920, 0] },
+    { "area": [-1920, 0, 1920, 1080], "norm": [1.0, 1.0], "expected": [-1, 1079] },
+    { "area": [1920, -200, 2560, 1440], "norm": [0.0, 0.0], "expected": [1920, -200] },
+    { "area": [1920, -200, 2560, 1440], "norm": [1.0, 1.0], "expected": [4479, 1239] },
+    { "area": [1920, -200, 2560, 1440], "norm": [0.5, 0.5], "expected": [3200, 520] },
+    { "area": [0, 0, 6, 6], "norm": [0.5, 0.5], "expected": [3, 3] },
+    { "area": [0, 0, 6, 6], "norm": [1.0, 1.0], "expected": [5, 5] }
+  ],
+  "normalization": [
+    { "pad": [800, 400], "local": [399.5, 199.5], "expected": [0.5, 0.5] },
+    { "pad": [800, 400], "local": [0, 0], "expected": [0.0, 0.0] },
+    { "pad": [800, 400], "local": [799, 399], "expected": [1.0, 1.0] },
+    { "pad": [800, 400], "local": [-5, 500], "expected": [0.0, 1.0] },
+    { "pad": [1, 400], "local": [0, 200], "expected": [0.5, 0.5] },
+    { "pad": [800, 1], "local": [400, 0], "expected": [0.5, 0.5] }
+  ],
+  "timestampWraparound": [
+    {
+      "prev": 4294967291,
+      "curr": 5,
+      "expectedDeltaMs": 10
+    }
+  ]
+}
