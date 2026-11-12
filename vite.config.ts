@@ -181,6 +181,7 @@ function websocketRelay(): Plugin {
       const wss = new WebSocketServer({ noServer: true, maxPayload: 65536 });
 
       server.httpServer.on('upgrade', (req, socket, head) => {
+        socket.on('error', () => {});
         const url = req.url || '';
         const secProtocol = String(req.headers['sec-websocket-protocol'] || '');
         if (secProtocol.includes('vite-hmr')) return;
@@ -392,6 +393,10 @@ function websocketRelay(): Plugin {
               }
             }
           }
+        });
+
+        ws.on('error', (err) => {
+          console.error('[WebSocket Relay Error]:', err.message);
         });
       });
     },

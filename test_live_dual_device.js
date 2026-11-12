@@ -430,7 +430,11 @@ async function runFourStageIntegrationTest() {
     const tcpReceivedHandshakes = [];
     const tcpReceivedStrokes = [];
 
+    const pcServerSockets = new Set();
     const pcTcpServer = net.createServer((socket) => {
+      pcServerSockets.add(socket);
+      socket.on('close', () => pcServerSockets.delete(socket));
+      socket.on('error', () => {});
       let headerBuf = Buffer.alloc(0);
       let upgraded = false;
       let frameBuf = Buffer.alloc(0);
@@ -577,6 +581,7 @@ async function runFourStageIntegrationTest() {
 
     // 3. Test Split-Packet WebSocket Upgrade (simulating Wi-Fi / USB MTU packet split)
     const rawMobileSocket = net.connect(pcTcpPort, '127.0.0.1');
+    rawMobileSocket.on('error', () => {});
     await new Promise((res, rej) => {
       rawMobileSocket.once('connect', res);
       rawMobileSocket.once('error', rej);
@@ -607,6 +612,7 @@ async function runFourStageIntegrationTest() {
         }
       });
     });
+    rawMobileSocket.end();
     rawMobileSocket.destroy();
 
     // 4. Connect Mobile APK over USB (127.0.0.1) using standard WebSocket client, verify connect_accept & 13-byte stroke
@@ -744,8 +750,11 @@ async function runFourStageIntegrationTest() {
       throw new Error('Eraser stroke frames did not preserve tool=1');
     }
 
+    usbWs.terminate?.();
     usbWs.close();
     udpServer.close();
+    for (const s of pcServerSockets) s.destroy();
+    pcTcpServer.closeAllConnections?.();
     pcTcpServer.close();
 
     console.log(
@@ -753,10 +762,12 @@ async function runFourStageIntegrationTest() {
     );
 
     console.log('\n================================================================');
-    console.log('RESULT: ALL 7 LOOPBACK, DUAL-DEVICE & LIVE DRAWING STAGES PASSED (v2.1.1)');
+    console.log('RESULT: ALL 7 LOOPBACK, DUAL-DEVICE & LIVE DRAWING STAGES PASSED (v2.1.2)');
     console.log('================================================================\n');
   } finally {
+    wss.clients.forEach((c) => c.terminate?.());
     wss.close();
+    httpServer.closeAllConnections?.();
     httpServer.close();
   }
 }
@@ -775,7 +786,9 @@ function waitFor(predicate, timeoutMs = 3000) {
   });
 }
 
-runFourStageIntegrationTest().catch((err) => {
-  console.error('Integration test failed:', err);
-  process.exit(1);
-});
+runFourStageIntegrationTest()
+  .then(() => process.exit(0))
+  .catch((err) => {
+    console.error('Integration test failed:', err);
+    process.exit(1);
+  });
