@@ -25,7 +25,7 @@ import {
 } from 'lucide-react';
 import { DrawingEngine } from '../../services/drawingEngine.ts';
 import { ConnectionManager } from '../../services/connectionManager.ts';
-import { Stroke } from '../../types/index.ts';
+import { Stroke, BrushMode } from '../../types/index.ts';
 import { LicenseService } from '../../services/licenseService.ts';
 import { Crown } from 'lucide-react';
 import { GoogleDriveModal } from '../drive/GoogleDriveModal.tsx';
@@ -90,6 +90,12 @@ export const DrawingStudio: React.FC<DrawingStudioProps> = ({
   const inkCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const isDrawingRef = useRef(false);
+  const activePointerIdRef = useRef<number | null>(null);
+  const hardwareEraserRestoreRef = useRef<{
+    tool: 'pen' | 'brush' | 'highlighter' | 'eraser' | 'line' | 'arrow' | 'rect' | 'circle';
+    engineMode: BrushMode;
+  } | null>(null);
+  const suppressEngineSyncRef = useRef(false);
   const shapeStartRef = useRef<{ x: number; y: number } | null>(null);
   const currentPtsRef = useRef<{ x: number; y: number; width: number }[]>([]);
 
@@ -161,6 +167,7 @@ export const DrawingStudio: React.FC<DrawingStudioProps> = ({
       const prevCount = prevEngineStrokeCountRef.current;
 
       if (
+        !suppressEngineSyncRef.current &&
         engine.currentStroke === null &&
         engine.currentRemoteStroke === null &&
         currentCount !== prevCount
@@ -560,8 +567,14 @@ export const DrawingStudio: React.FC<DrawingStudioProps> = ({
 
   // Pointer interactions for direct Studio drawing
   const handlePointerDown = (e: React.PointerEvent) => {
+    if (e.pointerType === 'mouse' && e.button !== 0 && e.button !== 2 && e.button !== 5) return;
+    if (activePointerIdRef.current !== null && activePointerIdRef.current !== e.pointerId) {
+      return;
+    }
+
     const canvas = canvasRef.current;
     if (!canvas) return;
+    activePointerIdRef.current = e.pointerId;
     try {
       canvas.setPointerCapture(e.pointerId);
     } catch {}
@@ -578,6 +591,13 @@ export const DrawingStudio: React.FC<DrawingStudioProps> = ({
 
     const effectiveTool =
       isHardwareEraser || engine.brushSettings.mode === 'eraser' ? 'eraser' : activeTool;
+
+    if (isHardwareEraser && activeTool !== 'eraser') {
+      hardwareEraserRestoreRef.current = {
+        tool: activeTool,
+        engineMode: engine.brushSettings.mode,
+      };
+    }
 
     if (effectiveTool === 'eraser' && activeTool !== 'eraser') {
       setActiveTool('eraser');
@@ -622,6 +642,7 @@ export const DrawingStudio: React.FC<DrawingStudioProps> = ({
 
   const handlePointerMove = (e: React.PointerEvent) => {
     if (!isDrawingRef.current) return;
+    if (activePointerIdRef.current !== null && e.pointerId !== activePointerIdRef.current) return;
     const canvas = canvasRef.current;
     if (!canvas) return;
 
@@ -658,11 +679,23 @@ export const DrawingStudio: React.FC<DrawingStudioProps> = ({
     }
   };
 
-  const handlePointerUp = () => {
+  const handlePointerUp = (e?: React.PointerEvent) => {
+    if (e && activePointerIdRef.current !== null && e.pointerId !== activePointerIdRef.current) {
+      return;
+    }
+    const canvas = canvasRef.current;
+    if (e && canvas) {
+      try {
+        if (canvas.hasPointerCapture(e.pointerId)) {
+          canvas.releasePointerCapture(e.pointerId);
+        }
+      } catch {}
+    }
+    activePointerIdRef.current = null;
+
     if (!isDrawingRef.current) return;
     isDrawingRef.current = false;
 
-    const canvas = canvasRef.current;
     const dpr = window.devicePixelRatio || 1;
     const canvasW = canvas ? Math.max(1, canvas.width / dpr) : 1920;
     const canvasH = canvas ? Math.max(1, canvas.height / dpr) : 1080;
@@ -777,6 +810,12 @@ export const DrawingStudio: React.FC<DrawingStudioProps> = ({
 
     currentPtsRef.current = [];
     shapeStartRef.current = null;
+    if (hardwareEraserRestoreRef.current) {
+      const prev = hardwareEraserRestoreRef.current;
+      hardwareEraserRestoreRef.current = null;
+      setActiveTool(prev.tool);
+      engine.updateBrush({ mode: prev.engineMode });
+    }
   };
 
   // Export to PNG (Free + Pro)
@@ -957,8 +996,13 @@ export const DrawingStudio: React.FC<DrawingStudioProps> = ({
   };
 
   const handleClear = () => {
-    engine.clearCanvas();
-    prevEngineStrokeCountRef.current = 0;
+    suppressEngineSyncRef.current = true;
+    try {
+      engine.clearCanvas();
+    } finally {
+      prevEngineStrokeCountRef.current = engine.strokes.length;
+      suppressEngineSyncRef.current = false;
+    }
     connection.sendAction('clear');
     setPages((prev) =>
       prev.map((pg, idx) => (idx === activePageIndex ? { ...pg, strokes: [], redoStack: [] } : pg))
@@ -977,8 +1021,13 @@ export const DrawingStudio: React.FC<DrawingStudioProps> = ({
       )
     );
     if (!popped.id.startsWith('studio_')) {
-      engine.undo();
-      prevEngineStrokeCountRef.current = engine.strokes.length;
+      suppressEngineSyncRef.current = true;
+      try {
+        engine.undo();
+      } finally {
+        prevEngineStrokeCountRef.current = engine.strokes.length;
+        suppressEngineSyncRef.current = false;
+      }
     }
     connection.sendAction('undo');
   };
@@ -995,8 +1044,13 @@ export const DrawingStudio: React.FC<DrawingStudioProps> = ({
       )
     );
     if (!restored.id.startsWith('studio_')) {
-      engine.redo();
-      prevEngineStrokeCountRef.current = engine.strokes.length;
+      suppressEngineSyncRef.current = true;
+      try {
+        engine.redo();
+      } finally {
+        prevEngineStrokeCountRef.current = engine.strokes.length;
+        suppressEngineSyncRef.current = false;
+      }
     }
     connection.sendAction('redo');
   };
@@ -1287,6 +1341,7 @@ export const DrawingStudio: React.FC<DrawingStudioProps> = ({
           onPointerDown={handlePointerDown}
           onPointerMove={handlePointerMove}
           onPointerUp={handlePointerUp}
+          onPointerCancel={handlePointerUp}
           className="block w-full h-full cursor-crosshair touch-none"
         />
       </div>

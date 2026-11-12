@@ -513,8 +513,10 @@ namespace AirCanvas
                 contextMenu.Items.Add(new ToolStripSeparator());
                 contextMenu.Items.Add("❌ Exit Air Canvas", null, (s, e) =>
                 {
-                    try { _trayIcon.Visible = false; } catch { }
-                    try { if (_httpListener != null) _httpListener.Stop(); } catch { }
+                    try { AirCanvasServer.StopServer(); } catch { }
+                    try { if (_trayIcon != null) { _trayIcon.Visible = false; _trayIcon.Dispose(); } } catch { }
+                    try { if (_httpListener != null) { _httpListener.Stop(); _httpListener = null; } } catch { }
+                    try { if (_appProcess != null && !_appProcess.HasExited) _appProcess.Kill(); } catch { }
                     Application.Exit();
                     Environment.Exit(0);
                 });

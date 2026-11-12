@@ -1959,7 +1959,8 @@ namespace AirCanvas.Server
 
                                 if (json.Contains("\"ping\""))
                                 {
-                                    long nowTs = DateTime.UtcNow.Ticks / 10000;
+                                    long pingTs = (long)ExtractJsonDouble(json, "timestamp", 0);
+                                    long nowTs = pingTs > 0 ? pingTs : (DateTime.UtcNow.Ticks / 10000);
                                     SendMaskedClientWsText(ssl, "{\"type\":\"pong\",\"timestamp\":" + nowTs + "}");
                                 }
                                 else if (!json.Contains("\"pong\""))
@@ -2506,7 +2507,8 @@ namespace AirCanvas.Server
             {
                 if (json.Contains("\"ping\""))
                 {
-                    long now = DateTime.UtcNow.Ticks / 10000;
+                    long pingTs = (long)ExtractJsonDouble(json, "timestamp", 0);
+                    long now = pingTs > 0 ? pingTs : (DateTime.UtcNow.Ticks / 10000);
                     SendWsTextMessage(stream, "{\"type\":\"pong\",\"timestamp\":" + now + "}");
                     return;
                 }
@@ -2566,8 +2568,11 @@ namespace AirCanvas.Server
 
                 if (type == "brush_update")
                 {
-                    string mode = ExtractJsonString(json, "mode", "pen");
-                    TriggerToolShortcut(mode.Equals("eraser", StringComparison.OrdinalIgnoreCase));
+                    string mode = ExtractJsonString(json, "mode", "");
+                    if (!string.IsNullOrEmpty(mode))
+                    {
+                        TriggerToolShortcut(mode.Equals("eraser", StringComparison.OrdinalIgnoreCase));
+                    }
                     return;
                 }
 
@@ -3083,9 +3088,7 @@ namespace AirCanvas.Server
                         var key = Console.ReadKey(true).Key;
                         if (key == ConsoleKey.Q)
                         {
-                            _isRunning = false;
-                            try { if (_tcpListener != null) _tcpListener.Stop(); } catch { }
-                            try { if (_udpListener != null) _udpListener.Close(); } catch { }
+                            StopServer();
                         }
                         else if (key == ConsoleKey.T)
                         {

@@ -299,7 +299,10 @@ export const DrawingScreen: React.FC<DrawingScreenProps> = ({
             {connection.state === 'connected' ? (
               <button
                 type="button"
-                onClick={() => setShowPairModal(true)}
+                onClick={() => {
+                  setPairPin(connection.pairingPin || '1234');
+                  setShowPairModal(true);
+                }}
                 className="h-8 px-2.5 bg-slate-900 hover:bg-slate-800 border border-emerald-500/40 text-emerald-300 rounded-xl text-[11px] sm:text-xs font-semibold flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0"
                 title="Connected to PC — Tap to view PIN or switch device"
               >
@@ -314,7 +317,10 @@ export const DrawingScreen: React.FC<DrawingScreenProps> = ({
             ) : (
               <button
                 type="button"
-                onClick={() => setShowPairModal(true)}
+                onClick={() => {
+                  setPairPin(connection.pairingPin || '1234');
+                  setShowPairModal(true);
+                }}
                 className="h-8 px-2.5 bg-slate-900 hover:bg-slate-800 border border-cyan-500/40 text-cyan-300 hover:text-white rounded-xl text-[11px] sm:text-xs font-semibold flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0"
               >
                 <Zap className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
@@ -967,7 +973,7 @@ export const DrawingScreen: React.FC<DrawingScreenProps> = ({
                     setIsPairing(true);
                     const success = await connection.connectToServer(
                       '127.0.0.1',
-                      9090,
+                      connection.serverPort || 9090,
                       pairPin || '1234',
                       'usb'
                     );

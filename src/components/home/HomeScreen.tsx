@@ -63,12 +63,17 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
   >([]);
   const [isConnecting, setIsConnecting] = useState(false);
   const [, setTick] = useState(0);
+  const prevPairingPinRef = React.useRef(connection.pairingPin);
 
   React.useEffect(() => {
     const unsubConn = connection.subscribe(() => {
       setTick((t) => t + 1);
       if (!userEditedIp && connection.localIp) {
         setIpInput(connection.localIp);
+      }
+      if (connection.pairingPin && connection.pairingPin !== prevPairingPinRef.current) {
+        prevPairingPinRef.current = connection.pairingPin;
+        setQuickPin(connection.pairingPin);
       }
     });
     const unsubEng = engine.subscribe(() => setTick((t) => t + 1));
@@ -821,7 +826,10 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
                 </button>
                 <button
                   type="button"
-                  onClick={() => engine.clearCanvas()}
+                  onClick={() => {
+                    engine.clearCanvas();
+                    connection.sendAction('clear');
+                  }}
                   className="h-8 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold border border-slate-700 transition-colors"
                 >
                   Clear

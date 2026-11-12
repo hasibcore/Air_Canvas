@@ -644,6 +644,10 @@ export class DrawingEngine {
     if (this.currentStroke && this.activePointerId !== null && this.activePointerId !== pointerId) {
       const currentKind = this.currentStroke.points[0]?.pointerType;
       if (pointerType === 'stylus' && currentKind === 'finger') {
+        const prevLast = this.currentStroke.points[this.currentStroke.points.length - 1];
+        if (prevLast) {
+          this.emitEvent('pointerUp', prevLast.x, prevLast.y, 0, prevLast.pointerType, this.activePointerId, 0, 0, 0);
+        }
         if (this.currentStroke.points.length > 4) {
           this.strokes.push(this.currentStroke);
         }
@@ -654,6 +658,10 @@ export class DrawingEngine {
     }
 
     if (this.currentStroke) {
+      const prevLast = this.currentStroke.points[this.currentStroke.points.length - 1];
+      if (prevLast) {
+        this.emitEvent('pointerUp', prevLast.x, prevLast.y, 0, prevLast.pointerType, this.activePointerId ?? pointerId, 0, 0, 0);
+      }
       this.strokes.push(this.currentStroke);
       this.currentStroke = null;
     }
@@ -779,6 +787,7 @@ export class DrawingEngine {
       // Glitch / Missed-PointerUp Guard
       const maxJump = Math.max(this.canvasWidth, this.canvasHeight) * 0.3;
       if (dt > 160 && rawDist > maxJump) {
+        this.emitEvent('pointerUp', lastPt.x, lastPt.y, 0, lastPt.pointerType, pointerId, 0, 0, 0);
         this.strokes.push(this.currentStroke);
         this.oneEuro.reset();
         this.recentPointsForSmoothing = [{ x: posX, y: posY }];

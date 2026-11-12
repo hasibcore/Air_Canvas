@@ -245,8 +245,10 @@ class NetworkConnectionManager extends ChangeNotifier {
     notifyListeners();
   }
 
+  bool get _hasActiveSocket => _socket != null || _secondaryRelaySocket != null;
+
   void syncWorkingAreaToPC() {
-    if (!isConnected || _socket == null) return;
+    if (!isConnected || !_hasActiveSocket) return;
     try {
       final msg = jsonEncode({
         'type': 'workArea',
@@ -257,7 +259,9 @@ class NetworkConnectionManager extends ChangeNotifier {
         'left': selectedPreset.left,
         'right': selectedPreset.right,
       });
-      _socket!.add(msg);
+      try {
+        _socket?.add(msg);
+      } catch (_) {}
       try {
         _secondaryRelaySocket?.add(msg);
       } catch (_) {}
@@ -828,11 +832,11 @@ class NetworkConnectionManager extends ChangeNotifier {
 
       _pingTimer?.cancel();
       _pingTimer = Timer.periodic(const Duration(seconds: 2), (_) {
-        if (isConnected && _socket != null) {
+        if (isConnected && _hasActiveSocket) {
           _lastPingSent = DateTime.now().millisecondsSinceEpoch;
           final pingStr = jsonEncode({'type': 'ping', 'timestamp': _lastPingSent});
           try {
-            _socket!.add(pingStr);
+            _socket?.add(pingStr);
           } catch (_) {}
           try {
             _secondaryRelaySocket?.add(pingStr);
@@ -875,16 +879,20 @@ class NetworkConnectionManager extends ChangeNotifier {
           _secondaryRelaySocket = null;
           if (_socket == null && !_manualDisconnect) {
             isConnected = false;
+            _pingTimer?.cancel();
             statusMessage = 'Reconnecting (PIN $pairingPin)...';
             notifyListeners();
+            _scheduleAutoReconnect();
           }
         },
         onError: (_) {
           _secondaryRelaySocket = null;
           if (_socket == null && !_manualDisconnect) {
             isConnected = false;
+            _pingTimer?.cancel();
             statusMessage = 'Reconnecting (PIN $pairingPin)...';
             notifyListeners();
+            _scheduleAutoReconnect();
           }
         },
       );
@@ -966,15 +974,31 @@ class NetworkConnectionManager extends ChangeNotifier {
   }
 
   void _flushOutboundQueue() {
-    if (!isConnected || _socket == null || _outboundQueue.isEmpty) return;
+    if (!isConnected || !_hasActiveSocket || _outboundQueue.isEmpty) return;
     final pending = List<Uint8List>.from(_outboundQueue);
     _outboundQueue.clear();
     for (final frame in pending) {
+      bool delivered = false;
       try {
-        _socket!.add(frame);
-        _secondaryRelaySocket?.add(frame);
-        packetsSent++;
+        if (_socket != null) {
+          _socket!.add(frame);
+          delivered = true;
+        }
       } catch (_) {}
+      try {
+        if (_secondaryRelaySocket != null) {
+          _secondaryRelaySocket!.add(frame);
+          delivered = true;
+        }
+      } catch (_) {}
+      if (delivered) {
+        packetsSent++;
+      } else {
+        if (_outboundQueue.length >= 256) {
+          _outboundQueue.removeAt(0);
+        }
+        _outboundQueue.add(frame);
+      }
     }
   }
 
@@ -997,7 +1021,9 @@ class NetworkConnectionManager extends ChangeNotifier {
     final bool hasBackupRelay = !_manualDisconnect && _secondaryRelaySocket != null;
     isConnected = hasBackupRelay;
     isConnecting = false;
-    _pingTimer?.cancel();
+    if (!hasBackupRelay) {
+      _pingTimer?.cancel();
+    }
     statusMessage = _manualDisconnect
         ? reason
         : (hasBackupRelay
@@ -1127,15 +1153,24 @@ class NetworkConnectionManager extends ChangeNotifier {
       timestamp: DateTime.now().millisecondsSinceEpoch,
     );
 
-    if (isConnected && _socket != null) {
+    if (isConnected && _hasActiveSocket) {
+      bool delivered = false;
       try {
-        _socket!.add(frame);
-        try {
-          _secondaryRelaySocket?.add(frame);
-        } catch (_) {}
+        if (_socket != null) {
+          _socket!.add(frame);
+          delivered = true;
+        }
+      } catch (_) {}
+      try {
+        if (_secondaryRelaySocket != null) {
+          _secondaryRelaySocket!.add(frame);
+          delivered = true;
+        }
+      } catch (_) {}
+      if (delivered) {
         packetsSent++;
         return;
-      } catch (_) {}
+      }
     }
 
     if (_outboundQueue.length >= 256) {
@@ -1148,7 +1183,7 @@ class NetworkConnectionManager extends ChangeNotifier {
   }
 
   void sendToolShortcut(ToolType tool) {
-    if (!isConnected || _socket == null) return;
+    if (!isConnected || !_hasActiveSocket) return;
     try {
       final isEraser = tool == ToolType.eraser;
       final now = DateTime.now().millisecondsSinceEpoch;
@@ -1162,7 +1197,9 @@ class NetworkConnectionManager extends ChangeNotifier {
         },
         'timestamp': now,
       });
-      _socket!.add(msg);
+      try {
+        _socket?.add(msg);
+      } catch (_) {}
       try {
         _secondaryRelaySocket?.add(msg);
       } catch (_) {}
@@ -1170,7 +1207,7 @@ class NetworkConnectionManager extends ChangeNotifier {
   }
 
   void sendCanvasAction(String action) {
-    if (!isConnected || _socket == null) return;
+    if (!isConnected || !_hasActiveSocket) return;
     try {
       final now = DateTime.now().millisecondsSinceEpoch;
       final msg = jsonEncode({
@@ -1180,7 +1217,9 @@ class NetworkConnectionManager extends ChangeNotifier {
         },
         'timestamp': now,
       });
-      _socket!.add(msg);
+      try {
+        _socket?.add(msg);
+      } catch (_) {}
       try {
         _secondaryRelaySocket?.add(msg);
       } catch (_) {}
@@ -1188,7 +1227,7 @@ class NetworkConnectionManager extends ChangeNotifier {
   }
 
   void sendBrushUpdate({Color? color, double? baseWidth, ToolType? tool}) {
-    if (!isConnected || _socket == null) return;
+    if (!isConnected || !_hasActiveSocket) return;
     try {
       final Map<String, dynamic> brush = {};
       if (tool != null) {
@@ -1208,7 +1247,9 @@ class NetworkConnectionManager extends ChangeNotifier {
         'brush': brush,
         'timestamp': DateTime.now().millisecondsSinceEpoch,
       });
-      _socket!.add(msg);
+      try {
+        _socket?.add(msg);
+      } catch (_) {}
       try {
         _secondaryRelaySocket?.add(msg);
       } catch (_) {}

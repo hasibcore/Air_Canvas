@@ -478,17 +478,20 @@ export class ConnectionManager {
         };
 
         socket.onmessage = (ev) => {
-          this.processIncomingSocketData(ev.data);
+          this.processIncomingSocketData(ev.data, socket);
           if (this.localServerWs && this.localServerWs.readyState === WebSocket.OPEN) {
             if (ev.data instanceof ArrayBuffer) {
               try { this.localServerWs.send(ev.data); } catch {}
-            } else if (typeof ev.data === 'string' && (ev.data.includes('pointer') || ev.data.includes('input_event') || ev.data.includes('workArea') || ev.data.includes('action'))) {
+            } else if (typeof ev.data === 'string' && (ev.data.includes('pointer') || ev.data.includes('input_event') || ev.data.includes('workArea') || ev.data.includes('action') || ev.data.includes('brush_update'))) {
               try { this.localServerWs.send(ev.data); } catch {}
             }
           }
         };
 
         socket.onclose = () => {
+          if (this.ws === socket) {
+            this.ws = null;
+          }
           if (this.localServerWs && this.localServerWs.readyState === WebSocket.OPEN) {
             this.relayState = 'connected';
           } else {
@@ -496,9 +499,9 @@ export class ConnectionManager {
           }
           this.notify();
           // Auto-reconnect if still in server mode
-          if (this.mode === 'server') {
+          if (this.mode === 'server' && !this.isSimulatedOffline) {
             this.hostReconnectTimer = setTimeout(() => {
-              if (this.mode === 'server') {
+              if (this.mode === 'server' && !this.isSimulatedOffline) {
                 this.startServer(this.pairingPin);
               }
             }, 2500);
@@ -586,13 +589,13 @@ export class ConnectionManager {
       };
 
       cws.onmessage = (ev) => {
-        this.processIncomingSocketData(ev.data);
+        this.processIncomingSocketData(ev.data, cws);
         // Forward incoming binary/JSON stroke packets from Cloud Relay directly to local AirCanvasServer.exe (127.0.0.1:9090)
         // so Windows native pen injection works even when LAN port 9090 is firewalled!
         if (this.localServerWs && this.localServerWs.readyState === WebSocket.OPEN) {
           if (ev.data instanceof ArrayBuffer) {
             try { this.localServerWs.send(ev.data); } catch {}
-          } else if (typeof ev.data === 'string' && (ev.data.includes('pointer') || ev.data.includes('input_event') || ev.data.includes('workArea') || ev.data.includes('action'))) {
+          } else if (typeof ev.data === 'string' && (ev.data.includes('pointer') || ev.data.includes('input_event') || ev.data.includes('workArea') || ev.data.includes('action') || ev.data.includes('brush_update'))) {
             try { this.localServerWs.send(ev.data); } catch {}
           }
         }
@@ -629,7 +632,7 @@ export class ConnectionManager {
       };
 
       lws.onmessage = (ev) => {
-        this.processIncomingSocketData(ev.data);
+        this.processIncomingSocketData(ev.data, lws);
       };
 
       lws.onerror = () => {
@@ -739,7 +742,7 @@ export class ConnectionManager {
     });
   }
 
-  private processIncomingSocketData(raw: any): void {
+  private processIncomingSocketData(raw: any, sourceWs?: WebSocket): void {
     if (raw instanceof ArrayBuffer) {
       this.decodeBinaryPacket(raw);
       return;
@@ -874,8 +877,14 @@ export class ConnectionManager {
           timestamp: data.timestamp,
           serverTimestamp: Date.now(),
         });
-        if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-          try { this.ws.send(pong); } catch {}
+        const replyTarget =
+          sourceWs && sourceWs.readyState === WebSocket.OPEN
+            ? sourceWs
+            : this.ws && this.ws.readyState === WebSocket.OPEN
+              ? this.ws
+              : null;
+        if (replyTarget) {
+          try { replyTarget.send(pong); } catch {}
         }
         return;
       }
@@ -1504,15 +1513,18 @@ export class ConnectionManager {
         this.flushOutboundQueue(socket);
 
         socket.onmessage = (ev) => {
-          this.processIncomingSocketData(ev.data);
+          this.processIncomingSocketData(ev.data, socket);
         };
 
         socket.onclose = () => {
+          if (this.ws === socket) {
+            this.ws = null;
+          }
           this.relayState = 'disconnected';
           // Auto-reconnect in background if client was connected
-          if (this.mode === 'client' && this.state === 'connected') {
+          if (this.mode === 'client' && this.state === 'connected' && !this.isSimulatedOffline) {
             this.hostReconnectTimer = setTimeout(() => {
-              if (this.mode === 'client') {
+              if (this.mode === 'client' && !this.isSimulatedOffline) {
                 this.connectToServer(ip, port, cleanPin, cand.modeType);
               }
             }, 2000);
@@ -2058,9 +2070,12 @@ export class ConnectionManager {
         this.notify();
       };
       socket.onmessage = (ev) => {
-        this.processIncomingSocketData(ev.data);
+        this.processIncomingSocketData(ev.data, socket);
       };
       socket.onclose = () => {
+        if (this.ws === socket) {
+          this.ws = null;
+        }
         this.relayState = 'disconnected';
       };
     } catch {}
@@ -2171,10 +2186,23 @@ export class ConnectionManager {
       timestamp: Date.now(),
     };
     this.bc?.postMessage(payload);
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      try {
-        this.ws.send(JSON.stringify(payload));
-      } catch {}
+    const serialized = JSON.stringify(payload);
+    if (!this.isSimulatedOffline) {
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        try {
+          this.ws.send(serialized);
+        } catch {}
+      }
+      if (this.cloudBridgeWs && this.cloudBridgeWs.readyState === WebSocket.OPEN) {
+        try {
+          this.cloudBridgeWs.send(serialized);
+        } catch {}
+      }
+      if (this.localServerWs && this.localServerWs.readyState === WebSocket.OPEN) {
+        try {
+          this.localServerWs.send(serialized);
+        } catch {}
+      }
     }
   }
 
@@ -2191,19 +2219,37 @@ export class ConnectionManager {
       timestamp: Date.now(),
     };
     this.bc?.postMessage(payload);
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      try {
-        this.ws.send(JSON.stringify(payload));
-      } catch {}
-    } else {
-      this.ensureSocketStreaming();
+    const serialized = JSON.stringify(payload);
+    let sent = false;
+    if (!this.isSimulatedOffline) {
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        try {
+          this.ws.send(serialized);
+          sent = true;
+        } catch {}
+      }
+      if (this.cloudBridgeWs && this.cloudBridgeWs.readyState === WebSocket.OPEN) {
+        try {
+          this.cloudBridgeWs.send(serialized);
+          sent = true;
+        } catch {}
+      }
+      if (this.localServerWs && this.localServerWs.readyState === WebSocket.OPEN) {
+        try {
+          this.localServerWs.send(serialized);
+          sent = true;
+        } catch {}
+      }
+      if (!sent) {
+        this.ensureSocketStreaming();
+      }
     }
   }
 
   private startHeartbeat(): void {
     this.stopHeartbeat();
     this.pingInterval = window.setInterval(() => {
-      if (this.state === 'connected') {
+      if (this.state === 'connected' && !this.isSimulatedOffline) {
         const pingMsg = {
           type: 'ping',
           senderId: this.id,
@@ -2211,9 +2257,15 @@ export class ConnectionManager {
           timestamp: Date.now(),
         };
         this.bc?.postMessage(pingMsg);
+        const serialized = JSON.stringify(pingMsg);
         if (this.ws && this.ws.readyState === WebSocket.OPEN) {
           try {
-            this.ws.send(JSON.stringify(pingMsg));
+            this.ws.send(serialized);
+          } catch {}
+        }
+        if (this.cloudBridgeWs && this.cloudBridgeWs.readyState === WebSocket.OPEN) {
+          try {
+            this.cloudBridgeWs.send(serialized);
           } catch {}
         }
       }
