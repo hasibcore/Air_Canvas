@@ -127,7 +127,7 @@ public class EntitlementService : IEntitlementService
                     proPlanId = (Guid)result;
                 }
 
-                // Insert purchase record (Never stores credit-card info)
+                // Insert purchase record idempotently (Never stores credit-card info)
                 const string purchaseSql = @"
                     INSERT INTO public.purchases (
                         user_id, provider, product_id, purchase_token, order_id, 
@@ -135,7 +135,8 @@ public class EntitlementService : IEntitlementService
                     ) VALUES (
                         @userId, 'GOOGLE_PLAY', @productId, @token, @orderId,
                         'PURCHASED', NOW(), @expiry, true
-                    );";
+                    )
+                    ON CONFLICT (purchase_token, order_id) DO NOTHING;";
 
                 await using (var purchaseCmd = new NpgsqlCommand(purchaseSql, conn))
                 {
@@ -147,7 +148,7 @@ public class EntitlementService : IEntitlementService
                     await purchaseCmd.ExecuteNonQueryAsync();
                 }
 
-                // Upsert subscription
+                // Upsert subscription deterministically by unique purchase_token
                 const string subSql = @"
                     INSERT INTO public.subscriptions (
                         user_id, plan_id, provider, product_id, purchase_token, 
@@ -156,7 +157,12 @@ public class EntitlementService : IEntitlementService
                         @userId, @planId, 'GOOGLE_PLAY', @productId, @token,
                         @orderId, 'ACTIVE', NOW(), NOW(), @expiry, @autoRenew
                     )
-                    ON CONFLICT (id) DO NOTHING;";
+                    ON CONFLICT (purchase_token) DO UPDATE
+                    SET status = EXCLUDED.status,
+                        order_id = EXCLUDED.order_id,
+                        current_period_end = EXCLUDED.current_period_end,
+                        auto_renew = EXCLUDED.auto_renew,
+                        updated_at = NOW();";
 
                 await using (var subCmd = new NpgsqlCommand(subSql, conn))
                 {
@@ -172,7 +178,12 @@ public class EntitlementService : IEntitlementService
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Failed to persist subscription in Supabase DB.");
+                _logger.LogError(ex, "Failed to persist subscription in Supabase DB for User {UserId}", request.UserId);
+                return new PurchaseVerificationResult
+                {
+                    Success = false,
+                    ErrorMessage = "Subscription verification could not be persisted."
+                };
             }
         }
 
@@ -204,26 +215,25 @@ public class EntitlementService : IEntitlementService
 
     public async Task<bool> HandleGooglePlayRtdnAsync(GooglePlayRtdnNotification notification)
     {
-        var subNotification = notification.SubscriptionNotification;
+        var subNotification = notification?.SubscriptionNotification;
         if (subNotification == null || string.IsNullOrWhiteSpace(subNotification.PurchaseToken))
         {
             return false;
         }
 
-        _logger.LogInformation("Received Google Play RTDN event type: {Type} for token: {Token}",
-            subNotification.NotificationType, subNotification.PurchaseToken);
+        _logger.LogInformation("Received Google Play RTDN event type: {Type}", subNotification.NotificationType);
 
         // Map Google Play notification types:
         // 1: SUBSCRIPTION_RECOVERED -> ACTIVE
-        // 2: SUBSCRIPTION_RENEWED -> extend current_period_end
+        // 2: SUBSCRIPTION_RENEWED -> ACTIVE
         // 3: SUBSCRIPTION_CANCELED -> CANCELED
         // 4: SUBSCRIPTION_PURCHASED -> ACTIVE
         // 5: SUBSCRIPTION_ON_HOLD -> ON_HOLD
         // 6: SUBSCRIPTION_IN_GRACE_PERIOD -> GRACE_PERIOD
-        // 12: SUBSCRIPTION_REVOKED -> EXPIRED
+        // 12: SUBSCRIPTION_REVOKED -> REVOKED
         // 13: SUBSCRIPTION_EXPIRED -> EXPIRED
 
-        string newStatus = subNotification.NotificationType switch
+        string? newStatus = subNotification.NotificationType switch
         {
             1 => "ACTIVE",
             2 => "ACTIVE",
@@ -231,10 +241,16 @@ public class EntitlementService : IEntitlementService
             4 => "ACTIVE",
             5 => "ON_HOLD",
             6 => "GRACE_PERIOD",
-            12 => "EXPIRED",
+            12 => "REVOKED",
             13 => "EXPIRED",
-            _ => "ACTIVE"
+            _ => null
         };
+
+        if (newStatus == null)
+        {
+            _logger.LogWarning("Ignoring unrecognized Google Play RTDN type: {Type}", subNotification.NotificationType);
+            return false;
+        }
 
         if (!string.IsNullOrWhiteSpace(_connectionString) && !_connectionString.Contains("YOUR_SUPABASE_PROJECT"))
         {
@@ -245,7 +261,10 @@ public class EntitlementService : IEntitlementService
 
                 const string updateSql = @"
                     UPDATE public.subscriptions 
-                    SET status = @status, updated_at = NOW()
+                    SET status = @status,
+                        canceled_at = CASE WHEN @status = 'CANCELED' AND canceled_at IS NULL THEN NOW() ELSE canceled_at END,
+                        revoked_at = CASE WHEN @status = 'REVOKED' AND revoked_at IS NULL THEN NOW() ELSE revoked_at END,
+                        updated_at = NOW()
                     WHERE purchase_token = @token;";
 
                 await using var cmd = new NpgsqlCommand(updateSql, conn);

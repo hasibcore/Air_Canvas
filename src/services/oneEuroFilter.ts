@@ -33,7 +33,7 @@ export class OneEuroFilter {
   private dxFilter = new LowPassFilter();
   private lastTime: number | null = null;
 
-  constructor(minCutoff = 1.2, beta = 0.008, dCutoff = 1.0) {
+  constructor(minCutoff = 1.15, beta = 0.018, dCutoff = 1.2) {
     this.minCutoff = minCutoff;
     this.beta = beta;
     this.dCutoff = dCutoff;
@@ -52,10 +52,11 @@ export class OneEuroFilter {
       return this.xFilter.filter(value, 1.0);
     }
 
-    const dtMs = timestampMs - this.lastTime;
+    const rawDtMs = timestampMs - this.lastTime;
     this.lastTime = timestampMs;
 
-    const dt = dtMs > 0 ? dtMs / 1000.0 : 1.0 / 120.0;
+    // Clamp dt to [1ms .. 100ms] so sub-ms coalesced bursts and brief stalls never spike derivative estimates
+    const dt = rawDtMs > 0.5 ? Math.min(0.1, rawDtMs / 1000.0) : 1.0 / 120.0;
     const rate = 1.0 / dt;
 
     const prevX = this.xFilter.lastValue ?? value;
@@ -72,6 +73,10 @@ export class OneEuroFilter {
     return this.xFilter.filter(value, xAlpha);
   }
 
+  get velocity(): number {
+    return this.dxFilter.lastValue ?? 0;
+  }
+
   reset(): void {
     this.xFilter.reset();
     this.dxFilter.reset();
@@ -83,7 +88,7 @@ export class OneEuroFilter2D {
   private filterX: OneEuroFilter;
   private filterY: OneEuroFilter;
 
-  constructor(minCutoff = 1.2, beta = 0.008, dCutoff = 1.0) {
+  constructor(minCutoff = 1.15, beta = 0.018, dCutoff = 1.2) {
     this.filterX = new OneEuroFilter(minCutoff, beta, dCutoff);
     this.filterY = new OneEuroFilter(minCutoff, beta, dCutoff);
   }
@@ -92,6 +97,13 @@ export class OneEuroFilter2D {
     return {
       x: this.filterX.filter(x, timestampMs),
       y: this.filterY.filter(y, timestampMs),
+    };
+  }
+
+  getVelocity(): { vx: number; vy: number } {
+    return {
+      vx: this.filterX.velocity,
+      vy: this.filterY.velocity,
     };
   }
 

@@ -223,7 +223,8 @@ export async function saveDrawingToDrive(
  * Downloads a file's content from Google Drive
  */
 export async function downloadFileFromDrive(token: string, fileId: string): Promise<Blob> {
-  const res = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
+  const safeFileId = encodeURIComponent(fileId);
+  const res = await fetch(`https://www.googleapis.com/drive/v3/files/${safeFileId}?alt=media`, {
     headers: { Authorization: `Bearer ${token}` },
   });
 
@@ -238,7 +239,8 @@ export async function downloadFileFromDrive(token: string, fileId: string): Prom
  * Deletes a file from Google Drive (MUST be preceded by user confirmation)
  */
 export async function deleteFileFromDrive(token: string, fileId: string): Promise<void> {
-  const res = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}`, {
+  const safeFileId = encodeURIComponent(fileId);
+  const res = await fetch(`https://www.googleapis.com/drive/v3/files/${safeFileId}`, {
     method: 'DELETE',
     headers: { Authorization: `Bearer ${token}` },
   });

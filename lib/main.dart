@@ -207,7 +207,10 @@ class NetworkConnectionManager extends ChangeNotifier {
   int detectedPcWorkWidth = 1555;
   int detectedPcWorkHeight = 950;
   double detectedPcAspectRatio = 1555.0 / 950.0;
+  int fullPcScreenWidth = 1920;
+  int fullPcScreenHeight = 1080;
   bool autoAspectFit = true;
+  bool _hasWorkingAreaCrop = false;
 
   List<DiscoveredPC> discoveredDevices = [];
   final List<Uint8List> _outboundQueue = [];
@@ -215,9 +218,14 @@ class NetworkConnectionManager extends ChangeNotifier {
   Timer? _reconnectTimer;
   bool _manualDisconnect = false;
   int _lastPingSent = 0;
+  int _lastPongReceivedMs = 0;
+  int _connectEpoch = 0;
 
   void setTargetMode(String mode) {
     targetMode = mode;
+    if (mode == 'MONITOR') {
+      _hasWorkingAreaCrop = false;
+    }
     syncWorkingAreaToPC();
     notifyListeners();
   }
@@ -225,10 +233,11 @@ class NetworkConnectionManager extends ChangeNotifier {
   void setSoftwarePreset(SoftwareWorkAreaPreset preset) {
     selectedPreset = preset;
     targetMode = preset.id == 'full-screen' ? 'MONITOR' : 'CANVAS';
+    _hasWorkingAreaCrop = preset.id != 'full-screen';
     final double wPct = (1.0 - preset.left - preset.right).clamp(0.1, 1.0);
     final double hPct = (1.0 - preset.top - preset.bottom).clamp(0.1, 1.0);
-    detectedPcWorkWidth = (1920.0 * wPct).round();
-    detectedPcWorkHeight = (1080.0 * hPct).round();
+    detectedPcWorkWidth = (fullPcScreenWidth * wPct).round();
+    detectedPcWorkHeight = (fullPcScreenHeight * hPct).round();
     detectedPcAspectRatio = detectedPcWorkWidth / math.max(1, detectedPcWorkHeight);
     detectedPcAppName = preset.shortLabel;
     syncWorkingAreaToPC();
@@ -582,6 +591,7 @@ class NetworkConnectionManager extends ChangeNotifier {
       cleanPin = cleanIp;
       cleanIp = 'relay';
     }
+    final int myEpoch = ++_connectEpoch;
     pairingPin = cleanPin;
     _manualDisconnect = false;
     _reconnectTimer?.cancel();
@@ -591,6 +601,10 @@ class NetworkConnectionManager extends ChangeNotifier {
     notifyListeners();
 
     await disconnect(manual: false);
+    if (myEpoch != _connectEpoch || _manualDisconnect) {
+      isConnecting = false;
+      return false;
+    }
     isConnecting = true;
 
     final bool isCloudRelayTarget = cleanIp.toLowerCase() == 'relay' ||
@@ -732,6 +746,12 @@ class NetworkConnectionManager extends ChangeNotifier {
       }
     }
 
+    if (myEpoch != _connectEpoch || _manualDisconnect) {
+      try { await sock?.close(); } catch (_) {}
+      isConnecting = false;
+      return false;
+    }
+
     if (sock == null) {
       isConnected = false;
       isConnecting = false;
@@ -749,6 +769,7 @@ class NetworkConnectionManager extends ChangeNotifier {
     try {
       _socket = sock;
       _socket!.pingInterval = const Duration(seconds: 15);
+      _lastPongReceivedMs = DateTime.now().millisecondsSinceEpoch;
 
       isConnected = true;
       isConnecting = false;
@@ -833,7 +854,12 @@ class NetworkConnectionManager extends ChangeNotifier {
       _pingTimer?.cancel();
       _pingTimer = Timer.periodic(const Duration(seconds: 2), (_) {
         if (isConnected && _hasActiveSocket) {
-          _lastPingSent = DateTime.now().millisecondsSinceEpoch;
+          final int nowMs = DateTime.now().millisecondsSinceEpoch;
+          if (_socket != null && _lastPongReceivedMs > 0 && (nowMs - _lastPongReceivedMs) > 8500) {
+            _handleDisconnect('Connection stalled — reconnecting...');
+            return;
+          }
+          _lastPingSent = nowMs;
           final pingStr = jsonEncode({'type': 'ping', 'timestamp': _lastPingSent});
           try {
             _socket?.add(pingStr);
@@ -900,6 +926,7 @@ class NetworkConnectionManager extends ChangeNotifier {
   }
 
   void _handleIncomingSocketMessage(dynamic message) {
+    _lastPongReceivedMs = DateTime.now().millisecondsSinceEpoch;
     if (message is! String) return;
     try {
       final data = jsonDecode(message);
@@ -937,21 +964,30 @@ class NetworkConnectionManager extends ChangeNotifier {
       } else if (data['type'] == 'screen_sync') {
         final dynamic rawW = data['screenWidth'] ?? data['width'];
         final dynamic rawH = data['screenHeight'] ?? data['height'];
-        final int sw = (rawW is num) ? rawW.toInt() : detectedPcWorkWidth;
-        final int sh = (rawH is num) ? rawH.toInt() : detectedPcWorkHeight;
+        final int sw = (rawW is num) ? rawW.toInt() : fullPcScreenWidth;
+        final int sh = (rawH is num) ? rawH.toInt() : fullPcScreenHeight;
         if (sw >= 64 && sh >= 64) {
-          detectedPcWorkWidth = sw;
-          detectedPcWorkHeight = sh;
-          detectedPcAspectRatio = sw / sh;
+          fullPcScreenWidth = sw;
+          fullPcScreenHeight = sh;
+          if (!_hasWorkingAreaCrop || selectedPreset.id == 'full-screen') {
+            detectedPcWorkWidth = sw;
+            detectedPcWorkHeight = sh;
+            detectedPcAspectRatio = sw / sh;
+          }
           notifyListeners();
         }
       } else if (data['type'] == 'workingAreaDetected') {
+        final dynamic rawSw = data['screenWidth'];
+        final dynamic rawSh = data['screenHeight'];
+        if (rawSw is num && rawSw.toInt() >= 64) fullPcScreenWidth = rawSw.toInt();
+        if (rawSh is num && rawSh.toInt() >= 64) fullPcScreenHeight = rawSh.toInt();
         final int w = (data['workWidth'] is num) ? (data['workWidth'] as num).toInt() : detectedPcWorkWidth;
         final int h = (data['workHeight'] is num) ? (data['workHeight'] as num).toInt() : detectedPcWorkHeight;
         if (w >= 64 && h >= 64) {
           detectedPcWorkWidth = w;
           detectedPcWorkHeight = h;
           detectedPcAspectRatio = w / h;
+          _hasWorkingAreaCrop = (w < fullPcScreenWidth || h < fullPcScreenHeight || selectedPreset.id != 'full-screen');
         }
         if (data['appName'] is String && (data['appName'] as String).isNotEmpty) {
           detectedPcAppName = data['appName'] as String;
@@ -1337,6 +1373,84 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
 }
 
 // ==============================================================================
+// LOW-LATENCY 1-EURO FILTER FOR JITTER-FREE FLUTTER STYLUS & FINGER DRAWING
+// ==============================================================================
+class _OneEuroFilter1D {
+  final double minCutoff;
+  final double beta;
+  final double dCutoff;
+
+  double? _xPrev;
+  double _dxPrev = 0.0;
+  int? _tPrevUs;
+
+  _OneEuroFilter1D({
+    this.minCutoff = 1.15,
+    this.beta = 0.018,
+    this.dCutoff = 1.2,
+  });
+
+  double _alpha(double cutoff, double dt) {
+    final double tau = 1.0 / (2.0 * math.pi * cutoff);
+    return 1.0 / (1.0 + tau / dt);
+  }
+
+  void reset() {
+    _xPrev = null;
+    _dxPrev = 0.0;
+    _tPrevUs = null;
+  }
+
+  double filter(double x, int timestampUs) {
+    if (_xPrev == null || _tPrevUs == null) {
+      _xPrev = x;
+      _dxPrev = 0.0;
+      _tPrevUs = timestampUs;
+      return x;
+    }
+
+    final int rawDtUs = timestampUs - _tPrevUs!;
+    final double dt = rawDtUs > 500
+        ? math.min(0.1, rawDtUs / 1000000.0)
+        : (1.0 / 120.0);
+    _tPrevUs = timestampUs;
+
+    final double dx = (x - _xPrev!) / dt;
+    final double aD = _alpha(dCutoff, dt);
+    final double dxHat = aD * dx + (1.0 - aD) * _dxPrev;
+
+    final double cutoff = minCutoff + beta * dxHat.abs();
+    final double a = _alpha(cutoff, dt);
+    final double xHat = a * x + (1.0 - a) * _xPrev!;
+
+    _xPrev = xHat;
+    _dxPrev = dxHat;
+    return xHat;
+  }
+}
+
+class _OneEuroFilter2D {
+  final _OneEuroFilter1D _x;
+  final _OneEuroFilter1D _y;
+
+  _OneEuroFilter2D({
+    double minCutoff = 1.15,
+    double beta = 0.018,
+    double dCutoff = 1.2,
+  })  : _x = _OneEuroFilter1D(minCutoff: minCutoff, beta: beta, dCutoff: dCutoff),
+        _y = _OneEuroFilter1D(minCutoff: minCutoff, beta: beta, dCutoff: dCutoff);
+
+  void reset() {
+    _x.reset();
+    _y.reset();
+  }
+
+  Offset filter(double x, double y, int timestampUs) {
+    return Offset(_x.filter(x, timestampUs), _y.filter(y, timestampUs));
+  }
+}
+
+// ==============================================================================
 // 1. FULL-SCREEN TABLET PAD VIEW (v2.0.0: DISJOINT TOOLBARS & ZERO STRAIGHT LINES)
 // ==============================================================================
 class DrawingTabletPadView extends StatefulWidget {
@@ -1374,6 +1488,10 @@ class _DrawingTabletPadViewState extends State<DrawingTabletPadView> with Widget
 
   Offset? _cursorNormalized;
   double _currentPressure = 0.0;
+  final ValueNotifier<int> _paintNotifier = ValueNotifier<int>(0);
+  final _OneEuroFilter2D _oneEuro = _OneEuroFilter2D();
+  double? _smoothedPressure;
+  int _lastHudRefreshMs = 0;
 
   final List<Color> _palette = const [
     Color(0xFF00E5FF),
@@ -1393,6 +1511,7 @@ class _DrawingTabletPadViewState extends State<DrawingTabletPadView> with Widget
 
   @override
   void dispose() {
+    _paintNotifier.dispose();
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
@@ -1418,12 +1537,15 @@ class _DrawingTabletPadViewState extends State<DrawingTabletPadView> with Widget
         pressure: 0.0,
         tool: effectiveTool,
       );
+      _oneEuro.reset();
+      _smoothedPressure = null;
       setState(() {
         _activePointerId = null;
         _latchedStrokePadRect = null;
         _currentStroke = null;
         _currentPressure = 0.0;
       });
+      _paintNotifier.value++;
     }
   }
 
@@ -1493,6 +1615,13 @@ class _DrawingTabletPadViewState extends State<DrawingTabletPadView> with Widget
     final double normY = normPt.dy;
     final double pressure = event.pressure > 0 ? event.pressure.clamp(0.1, 1.0) : 0.65;
 
+    final int nowUs = DateTime.now().microsecondsSinceEpoch;
+    final int nowMs = nowUs ~/ 1000;
+    _oneEuro.reset();
+    _oneEuro.filter(normX * activeRect.width, normY * activeRect.height, nowUs);
+    _smoothedPressure = pressure;
+    _lastHudRefreshMs = nowMs;
+
     final bool isHardwareEraser = event.kind == PointerDeviceKind.invertedStylus ||
         (event.kind == PointerDeviceKind.stylus && (event.buttons & kSecondaryStylusButton) != 0);
     final ToolType effectiveTool = isHardwareEraser ? ToolType.eraser : _activeTool;
@@ -1500,7 +1629,7 @@ class _DrawingTabletPadViewState extends State<DrawingTabletPadView> with Widget
     final point = DrawPoint(
       offset: Offset(normX, normY),
       pressure: pressure,
-      timestamp: DateTime.now().millisecondsSinceEpoch,
+      timestamp: nowMs,
     );
 
     setState(() {
@@ -1516,6 +1645,7 @@ class _DrawingTabletPadViewState extends State<DrawingTabletPadView> with Widget
       _strokes.add(_currentStroke!);
       _strokeRevision++;
     });
+    _paintNotifier.value++;
 
     widget.net.sendPointerEvent(
       type: 'pointerDown',
@@ -1530,18 +1660,22 @@ class _DrawingTabletPadViewState extends State<DrawingTabletPadView> with Widget
     if (padSize.width <= 0 || padSize.height <= 0) return;
     if (_activePointerId == null || event.pointer != _activePointerId) return;
 
-    final Offset normPt = _normalizePadPoint(event.localPosition, padSize);
-    final double normX = normPt.dx;
-    final double normY = normPt.dy;
-    final double pressure = event.pressure > 0 ? event.pressure.clamp(0.1, 1.0) : 0.65;
+    final Rect activeRect = _latchedStrokePadRect ?? _computeActivePadRect(padSize);
+    final double spanW = math.max(1.0, activeRect.width);
+    final double spanH = math.max(1.0, activeRect.height);
 
-    final now = DateTime.now().millisecondsSinceEpoch;
+    final Offset rawNormPt = _normalizePadPoint(event.localPosition, padSize);
+    final double rawPressure = event.pressure > 0 ? event.pressure.clamp(0.1, 1.0) : 0.65;
 
-    // Guard against hardware touch controller jump (>35% of screen in a single frame)
+    final int nowUs = DateTime.now().microsecondsSinceEpoch;
+    final int nowMs = nowUs ~/ 1000;
+
+    // Guard against hardware touch controller jump (>35% of screen AND >160ms gap)
     if (_currentStroke != null && _currentStroke!.points.isNotEmpty) {
       final prev = _currentStroke!.points.last;
-      final dist = (Offset(normX, normY) - prev.offset).distance;
-      if (dist > 0.35) {
+      final dist = (rawNormPt - prev.offset).distance;
+      final int dtMs = math.max(1, nowMs - prev.timestamp);
+      if (dist > 0.35 && dtMs > 160) {
         final ToolType effectiveTool = _currentStroke?.tool ?? _activeTool;
         widget.net.sendPointerEvent(
           type: 'pointerUp',
@@ -1550,10 +1684,15 @@ class _DrawingTabletPadViewState extends State<DrawingTabletPadView> with Widget
           pressure: 0.0,
           tool: effectiveTool,
         );
-        final freshPoint = DrawPoint(offset: Offset(normX, normY), pressure: pressure, timestamp: now);
+        _oneEuro.reset();
+        _oneEuro.filter(rawNormPt.dx * spanW, rawNormPt.dy * spanH, nowUs);
+        _smoothedPressure = rawPressure;
+        _lastHudRefreshMs = nowMs;
+
+        final freshPoint = DrawPoint(offset: rawNormPt, pressure: rawPressure, timestamp: nowMs);
         setState(() {
-          _cursorNormalized = Offset(normX, normY);
-          _currentPressure = pressure;
+          _cursorNormalized = rawNormPt;
+          _currentPressure = rawPressure;
           _currentStroke = Stroke(
             points: [freshPoint],
             color: effectiveTool == ToolType.eraser ? Colors.transparent : _selectedColor,
@@ -1563,13 +1702,35 @@ class _DrawingTabletPadViewState extends State<DrawingTabletPadView> with Widget
           _strokes.add(_currentStroke!);
           _strokeRevision++;
         });
+        _paintNotifier.value++;
         widget.net.sendPointerEvent(
           type: 'pointerDown',
-          normX: normX,
-          normY: normY,
-          pressure: pressure,
+          normX: rawNormPt.dx,
+          normY: rawNormPt.dy,
+          pressure: rawPressure,
           tool: effectiveTool,
         );
+        return;
+      }
+    }
+
+    // 1-Euro coordinate filtering in logical pixel space + EMA pressure smoothing
+    final Offset filteredPx = _oneEuro.filter(rawNormPt.dx * spanW, rawNormPt.dy * spanH, nowUs);
+    final double normX = (filteredPx.dx / spanW).clamp(0.0, 1.0);
+    final double normY = (filteredPx.dy / spanH).clamp(0.0, 1.0);
+
+    final double prevP = _smoothedPressure ?? rawPressure;
+    final double emaP = 0.30 * rawPressure + 0.70 * prevP;
+    final double pDelta = emaP - prevP;
+    final double pressure = (prevP + pDelta.clamp(-0.075, 0.075)).clamp(0.1, 1.0);
+    _smoothedPressure = pressure;
+
+    // Micro-jitter gate (< 0.35 logical px from last point)
+    if (_currentStroke != null && _currentStroke!.points.isNotEmpty) {
+      final lastOffset = _currentStroke!.points.last.offset;
+      final double dxPx = (normX - lastOffset.dx) * spanW;
+      final double dyPx = (normY - lastOffset.dy) * spanH;
+      if ((dxPx * dxPx + dyPx * dyPx) < (0.35 * 0.35) && (pressure - _currentStroke!.points.last.pressure).abs() < 0.02) {
         return;
       }
     }
@@ -1577,17 +1738,22 @@ class _DrawingTabletPadViewState extends State<DrawingTabletPadView> with Widget
     final point = DrawPoint(
       offset: Offset(normX, normY),
       pressure: pressure,
-      timestamp: now,
+      timestamp: nowMs,
     );
 
     final ToolType effectiveTool = _currentStroke?.tool ?? _activeTool;
 
-    setState(() {
-      _cursorNormalized = Offset(normX, normY);
-      _currentPressure = pressure;
-      _currentStroke?.points.add(point);
-      _strokeRevision++;
-    });
+    _cursorNormalized = Offset(normX, normY);
+    _currentPressure = pressure;
+    _currentStroke?.points.add(point);
+    _strokeRevision++;
+    _paintNotifier.value++;
+
+    // Throttle full Flutter widget tree rebuilds to ~12.5 Hz (HUD coordinate readout only)
+    if (nowMs - _lastHudRefreshMs >= 80) {
+      _lastHudRefreshMs = nowMs;
+      setState(() {});
+    }
 
     widget.net.sendPointerEvent(
       type: 'pointerMove',
@@ -1601,10 +1767,44 @@ class _DrawingTabletPadViewState extends State<DrawingTabletPadView> with Widget
   void _onPointerUp(PointerUpEvent event, Size padSize) {
     if (_activePointerId != null && event.pointer != _activePointerId) return;
 
-    final Offset normPt = _normalizePadPoint(event.localPosition, padSize);
-    final double normX = normPt.dx;
-    final double normY = normPt.dy;
+    final Rect activeRect = _latchedStrokePadRect ?? _computeActivePadRect(padSize);
+    final double spanW = math.max(1.0, activeRect.width);
+    final double spanH = math.max(1.0, activeRect.height);
+
+    final Offset rawNormPt = _normalizePadPoint(event.localPosition, padSize);
+    final int nowUs = DateTime.now().microsecondsSinceEpoch;
+    final int nowMs = nowUs ~/ 1000;
+    double normX = rawNormPt.dx;
+    double normY = rawNormPt.dy;
+
+    if (_currentStroke != null && _currentStroke!.points.isNotEmpty) {
+      final prev = _currentStroke!.points.last;
+      final double jumpDist = (rawNormPt - prev.offset).distance;
+      final int dtMs = math.max(1, nowMs - prev.timestamp);
+      if (!(jumpDist > 0.35 && dtMs > 160)) {
+        final Offset filteredPx = _oneEuro.filter(rawNormPt.dx * spanW, rawNormPt.dy * spanH, nowUs);
+        normX = (filteredPx.dx / spanW).clamp(0.0, 1.0);
+        normY = (filteredPx.dy / spanH).clamp(0.0, 1.0);
+        final double dxPx = (normX - prev.offset.dx) * spanW;
+        final double dyPx = (normY - prev.offset.dy) * spanH;
+        if ((dxPx * dxPx + dyPx * dyPx) >= (0.35 * 0.35)) {
+          _currentStroke!.points.add(DrawPoint(
+            offset: Offset(normX, normY),
+            pressure: prev.pressure,
+            timestamp: nowMs,
+          ));
+          _strokeRevision++;
+        }
+      } else {
+        normX = prev.offset.dx;
+        normY = prev.offset.dy;
+      }
+    }
+
     final ToolType effectiveTool = _currentStroke?.tool ?? _activeTool;
+
+    _oneEuro.reset();
+    _smoothedPressure = null;
 
     setState(() {
       _activePointerId = null;
@@ -1616,6 +1816,7 @@ class _DrawingTabletPadViewState extends State<DrawingTabletPadView> with Widget
       }
       _currentStroke = null;
     });
+    _paintNotifier.value++;
 
     widget.net.sendPointerEvent(
       type: 'pointerUp',
@@ -1638,9 +1839,13 @@ class _DrawingTabletPadViewState extends State<DrawingTabletPadView> with Widget
     final double normY = normPt.dy;
 
     if (_cursorNormalized == null || (_cursorNormalized! - normPt).distance > 0.001) {
-      setState(() {
-        _cursorNormalized = Offset(normX, normY);
-      });
+      _cursorNormalized = Offset(normX, normY);
+      _paintNotifier.value++;
+      final int nowMs = DateTime.now().millisecondsSinceEpoch;
+      if (nowMs - _lastHudRefreshMs >= 80) {
+        _lastHudRefreshMs = nowMs;
+        setState(() {});
+      }
     }
 
     widget.net.sendPointerEvent(
@@ -1658,6 +1863,7 @@ class _DrawingTabletPadViewState extends State<DrawingTabletPadView> with Widget
         _redoStack.add(_strokes.removeLast());
         _strokeRevision++;
       });
+      _paintNotifier.value++;
     }
     widget.net.sendCanvasAction('undo');
   }
@@ -1668,6 +1874,7 @@ class _DrawingTabletPadViewState extends State<DrawingTabletPadView> with Widget
         _strokes.add(_redoStack.removeLast());
         _strokeRevision++;
       });
+      _paintNotifier.value++;
     }
     widget.net.sendCanvasAction('redo');
   }
@@ -1678,6 +1885,7 @@ class _DrawingTabletPadViewState extends State<DrawingTabletPadView> with Widget
       _redoStack.clear();
       _strokeRevision++;
     });
+    _paintNotifier.value++;
     widget.net.sendCanvasAction('clearCanvas');
   }
 
@@ -1981,17 +2189,22 @@ class _DrawingTabletPadViewState extends State<DrawingTabletPadView> with Widget
                 onPointerUp: (e) => _onPointerUp(e, padSize),
                 onPointerCancel: _onPointerCancel,
                 onPointerHover: (e) => _onPointerHover(e, padSize),
-                child: CustomPaint(
-                  size: padSize,
-                  painter: TabletCanvasPainter(
-                    strokes: _strokes,
-                    strokeRevision: _strokeRevision,
-                    background: _padBg,
-                    cursorNormalized: _cursorNormalized,
-                    currentPressure: _currentPressure,
-                    preset: preset,
-                    showSoftwareGuides: widget.net.showSoftwareDockGuides,
-                    activePadRect: activePadRect,
+                child: RepaintBoundary(
+                  child: CustomPaint(
+                    size: padSize,
+                    painter: TabletCanvasPainter(
+                      strokes: _strokes,
+                      strokeRevision: _strokeRevision,
+                      background: _padBg,
+                      cursorNormalized: _cursorNormalized,
+                      currentPressure: _currentPressure,
+                      liveCursorGetter: () => _cursorNormalized,
+                      livePressureGetter: () => _currentPressure,
+                      preset: preset,
+                      showSoftwareGuides: widget.net.showSoftwareDockGuides,
+                      activePadRect: activePadRect,
+                      repaint: _paintNotifier,
+                    ),
                   ),
                 ),
               );
@@ -2134,6 +2347,8 @@ class TabletCanvasPainter extends CustomPainter {
   final PadBackground background;
   final Offset? cursorNormalized;
   final double currentPressure;
+  final Offset? Function() liveCursorGetter;
+  final double Function() livePressureGetter;
   final SoftwareWorkAreaPreset preset;
   final bool showSoftwareGuides;
   final Rect activePadRect;
@@ -2144,9 +2359,12 @@ class TabletCanvasPainter extends CustomPainter {
     required this.background,
     required this.cursorNormalized,
     required this.currentPressure,
+    required this.liveCursorGetter,
+    required this.livePressureGetter,
     required this.preset,
     required this.showSoftwareGuides,
     required this.activePadRect,
+    super.repaint,
   });
 
   Offset _mapNormalizedToCanvas(Offset norm) {
@@ -2302,9 +2520,11 @@ class TabletCanvasPainter extends CustomPainter {
     canvas.restore();
 
     // 5. Active Stylus / Touch Cursor Ring
-    if (cursorNormalized != null) {
-      final pos = _mapNormalizedToCanvas(cursorNormalized!);
-      final radius = 6.0 + (currentPressure * 8.0);
+    final Offset? liveCursor = liveCursorGetter();
+    final double livePressure = livePressureGetter();
+    if (liveCursor != null) {
+      final pos = _mapNormalizedToCanvas(liveCursor);
+      final radius = 6.0 + (livePressure * 8.0);
       canvas.drawCircle(
         pos,
         radius,

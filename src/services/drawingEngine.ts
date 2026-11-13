@@ -175,9 +175,14 @@ export class DrawingEngine {
   public writingScale: WritingScalePreset = 'full';
   public writingAnchor: WritingAnchor = 'topLeft';
 
-  // Filters
-  private oneEuro = new OneEuroFilter2D(1.4, 0.01, 1.0);
+  // Filters & render invalidation
+  private oneEuro = new OneEuroFilter2D(1.15, 0.018, 1.2);
+  private remoteOneEuro = new OneEuroFilter2D(1.15, 0.018, 1.2);
   private recentPointsForSmoothing: { x: number; y: number }[] = [];
+  private remoteRecentPointsForSmoothing: { x: number; y: number }[] = [];
+  public renderVersion = 0;
+  private lastUiNotifyTime = 0;
+  private uiNotifyTimer: ReturnType<typeof setTimeout> | null = null;
 
   // Telemetry
   public liveFps = 60;
@@ -226,7 +231,37 @@ export class DrawingEngine {
   }
 
   public notify(): void {
+    this.renderVersion++;
+    if (this.uiNotifyTimer) {
+      clearTimeout(this.uiNotifyTimer);
+      this.uiNotifyTimer = null;
+    }
+    this.lastUiNotifyTime = Date.now();
     this.listeners.forEach((cb) => cb());
+  }
+
+  /**
+   * High-frequency canvas invalidation without triggering 120-240Hz React full-tree re-renders.
+   * React HUD/telemetry listeners still refresh smoothly at ~15Hz while the canvas paints at native refresh rate.
+   */
+  public notifyMoveThrottled(): void {
+    this.renderVersion++;
+    const now = Date.now();
+    const elapsed = now - this.lastUiNotifyTime;
+    if (elapsed >= 66) {
+      this.lastUiNotifyTime = now;
+      if (this.uiNotifyTimer) {
+        clearTimeout(this.uiNotifyTimer);
+        this.uiNotifyTimer = null;
+      }
+      this.listeners.forEach((cb) => cb());
+    } else if (!this.uiNotifyTimer) {
+      this.uiNotifyTimer = setTimeout(() => {
+        this.uiNotifyTimer = null;
+        this.lastUiNotifyTime = Date.now();
+        this.listeners.forEach((cb) => cb());
+      }, 66 - elapsed);
+    }
   }
 
   /**
@@ -678,9 +713,10 @@ export class DrawingEngine {
 
     const posX = Math.max(0, Math.min(this.canvasWidth, localX));
     const posY = Math.max(0, Math.min(this.canvasHeight, localY));
+    const highResNow = typeof performance !== 'undefined' ? performance.now() : Date.now();
 
     if (this.precisionMode === 'proAdaptive') {
-      this.oneEuro.filter(posX, posY, Date.now());
+      this.oneEuro.filter(posX, posY, highResNow);
     }
 
     this.recentPointsForSmoothing.push({ x: posX, y: posY });
@@ -780,7 +816,7 @@ export class DrawingEngine {
       const rawDist = Math.hypot(posX - lastPt.x, posY - lastPt.y);
       const dt = Math.max(1, now - lastPt.timestamp);
 
-      if (rawDist < 0.5) {
+      if (rawDist < 0.35) {
         return;
       }
 
@@ -790,6 +826,10 @@ export class DrawingEngine {
         this.emitEvent('pointerUp', lastPt.x, lastPt.y, 0, lastPt.pointerType, pointerId, 0, 0, 0);
         this.strokes.push(this.currentStroke);
         this.oneEuro.reset();
+        const jumpHighRes = typeof performance !== 'undefined' ? performance.now() : now;
+        if (this.precisionMode === 'proAdaptive') {
+          this.oneEuro.filter(posX, posY, jumpHighRes);
+        }
         this.recentPointsForSmoothing = [{ x: posX, y: posY }];
         const smoothedP = this.smoothPressure(pressure, true, false);
         const w = this.calculatePointWidth(smoothedP, 0, undefined, effectiveMode);
@@ -834,10 +874,11 @@ export class DrawingEngine {
       }
     }
 
+    const highResNow = typeof performance !== 'undefined' ? performance.now() : now;
     if (this.precisionMode === 'proAdaptive') {
-      const filtered = this.oneEuro.filter(posX, posY, now);
-      posX = filtered.x;
-      posY = filtered.y;
+      const filtered = this.oneEuro.filter(posX, posY, highResNow);
+      posX = Math.max(0, Math.min(this.canvasWidth, filtered.x));
+      posY = Math.max(0, Math.min(this.canvasHeight, filtered.y));
     } else if (this.precisionMode === 'studioSmooth') {
       this.recentPointsForSmoothing.push({ x: posX, y: posY });
       if (this.recentPointsForSmoothing.length > 4) {
@@ -851,7 +892,15 @@ export class DrawingEngine {
       posY = sum.y / this.recentPointsForSmoothing.length;
     }
 
-    this.predictedPosition = { x: posX, y: posY };
+    if (this.enablePrediction && this.precisionMode === 'proAdaptive') {
+      const vel = this.oneEuro.getVelocity();
+      this.predictedPosition = {
+        x: Math.max(0, Math.min(this.canvasWidth, posX + vel.vx * 0.008)),
+        y: Math.max(0, Math.min(this.canvasHeight, posY + vel.vy * 0.008)),
+      };
+    } else {
+      this.predictedPosition = { x: posX, y: posY };
+    }
 
     let velocity = 0;
     let prevWidth: number | undefined;
@@ -904,14 +953,16 @@ export class DrawingEngine {
       tiltY,
       effectiveButtons
     );
-    this.notify();
+    this.notifyMoveThrottled();
   }
 
   // Pointer Up
   public onPointerUp(
     pointerType: PointerKind = 'finger',
     pointerId = 0,
-    buttons = 0
+    buttons = 0,
+    finalX?: number,
+    finalY?: number
   ): void {
     if (!this.currentStroke) {
       this.activePointerId = null;
@@ -927,12 +978,58 @@ export class DrawingEngine {
       this.brushSettings.mode === 'eraser';
     const effectivePointerType: PointerKind = wasEraser ? 'eraser' : pointerType;
 
-    const lastPoint = this.currentStroke.points[this.currentStroke.points.length - 1];
-    const posX = lastPoint ? lastPoint.x : 0;
-    const posY = lastPoint ? lastPoint.y : 0;
-    const p = lastPoint ? lastPoint.pressure : 0.0;
+    const pts = this.currentStroke.points;
+    const lastPoint = pts[pts.length - 1];
+    let posX = lastPoint ? lastPoint.x : 0;
+    let posY = lastPoint ? lastPoint.y : 0;
 
-    this.emitEvent('pointerUp', posX, posY, p, effectivePointerType, pointerId, 0, 0, buttons);
+    if (
+      typeof finalX === 'number' &&
+      typeof finalY === 'number' &&
+      Number.isFinite(finalX) &&
+      Number.isFinite(finalY)
+    ) {
+      const clampedX = Math.max(0, Math.min(this.canvasWidth, finalX));
+      const clampedY = Math.max(0, Math.min(this.canvasHeight, finalY));
+      const now = Date.now();
+      const dt = lastPoint ? Math.max(1, now - lastPoint.timestamp) : 16;
+      const dist = lastPoint ? Math.hypot(clampedX - lastPoint.x, clampedY - lastPoint.y) : 0;
+      const maxJump = Math.max(this.canvasWidth, this.canvasHeight) * 0.3;
+
+      if (!lastPoint || !(dt > 160 && dist > maxJump)) {
+        posX = clampedX;
+        posY = clampedY;
+        if (lastPoint && dist >= 0.35) {
+          const { normX, normY } = DrawingEngine.normalizePadPoint(
+            posX,
+            posY,
+            this.canvasWidth,
+            this.canvasHeight
+          );
+          const velocity = dist / dt;
+          const releaseWidth = this.calculatePointWidth(
+            lastPoint.pressure,
+            velocity,
+            lastPoint.width,
+            this.currentStroke.settings.mode
+          );
+          pts.push({
+            x: posX,
+            y: posY,
+            normX,
+            normY,
+            pressure: lastPoint.pressure,
+            pointerType: effectivePointerType,
+            width: releaseWidth,
+            timestamp: now,
+            tiltX: lastPoint.tiltX,
+            tiltY: lastPoint.tiltY,
+          });
+        }
+      }
+    }
+
+    this.emitEvent('pointerUp', posX, posY, 0, effectivePointerType, pointerId, 0, 0, buttons);
 
     this.strokes.push(this.currentStroke);
     this.currentStroke = null;
@@ -1123,6 +1220,12 @@ export class DrawingEngine {
       if (this.currentRemoteStroke) {
         this.strokes.push(this.currentRemoteStroke);
       }
+      this.remoteOneEuro.reset();
+      this.remoteRecentPointsForSmoothing = [{ x: rawX, y: rawY }];
+      const remoteHrNow = typeof performance !== 'undefined' ? performance.now() : Date.now();
+      if (this.precisionMode === 'proAdaptive') {
+        this.remoteOneEuro.filter(rawX, rawY, remoteHrNow);
+      }
       const smoothedP = this.smoothPressure(incomingPressure, true, true);
       const width = this.calculatePointWidth(smoothedP, 0, undefined, remoteMode, remoteBaseWidth);
       this.currentRemoteStroke = {
@@ -1152,7 +1255,46 @@ export class DrawingEngine {
       this.predictedPosition = { x: rawX, y: rawY };
       this.notify();
     } else if (event.type === 'pointerMove' || event.type === 'hover') {
-      this.predictedPosition = { x: rawX, y: rawY };
+      let smoothX = rawX;
+      let smoothY = rawY;
+      let smoothNormX = normX;
+      let smoothNormY = normY;
+
+      if (event.type === 'pointerMove') {
+        const remoteHrNow = typeof performance !== 'undefined' ? performance.now() : Date.now();
+        if (!this.currentRemoteStroke || this.currentRemoteStroke.points.length === 0) {
+          this.remoteOneEuro.reset();
+          this.remoteRecentPointsForSmoothing = [{ x: rawX, y: rawY }];
+        }
+        if (this.precisionMode === 'proAdaptive') {
+          const filtered = this.remoteOneEuro.filter(rawX, rawY, remoteHrNow);
+          smoothX = Math.max(0, Math.min(this.canvasWidth, filtered.x));
+          smoothY = Math.max(0, Math.min(this.canvasHeight, filtered.y));
+        } else if (this.precisionMode === 'studioSmooth') {
+          if (this.currentRemoteStroke && this.currentRemoteStroke.points.length > 0) {
+            this.remoteRecentPointsForSmoothing.push({ x: rawX, y: rawY });
+          }
+          if (this.remoteRecentPointsForSmoothing.length > 4) {
+            this.remoteRecentPointsForSmoothing.shift();
+          }
+          const sum = this.remoteRecentPointsForSmoothing.reduce(
+            (acc, p) => ({ x: acc.x + p.x, y: acc.y + p.y }),
+            { x: 0, y: 0 }
+          );
+          smoothX = sum.x / this.remoteRecentPointsForSmoothing.length;
+          smoothY = sum.y / this.remoteRecentPointsForSmoothing.length;
+        }
+        const reNorm = DrawingEngine.normalizePadPoint(
+          smoothX,
+          smoothY,
+          this.canvasWidth,
+          this.canvasHeight
+        );
+        smoothNormX = reNorm.normX;
+        smoothNormY = reNorm.normY;
+      }
+
+      this.predictedPosition = { x: smoothX, y: smoothY };
       if (event.type === 'pointerMove' && (this.currentRemoteStroke || (event.buttons ?? 1) > 0)) {
         const now = event.timestamp || Date.now();
         const isFirst = !this.currentRemoteStroke || this.currentRemoteStroke.points.length === 0;
@@ -1167,14 +1309,24 @@ export class DrawingEngine {
           }
 
           const last = this.currentRemoteStroke.points[this.currentRemoteStroke.points.length - 1];
-          const dist = Math.hypot(rawX - last.x, rawY - last.y);
+          const dist = Math.hypot(smoothX - last.x, smoothY - last.y);
           const dt = Math.max(1, now - last.timestamp);
-          if (dist < 0.4) return;
+          if (dist < 0.35) return;
 
           const maxJump = Math.max(this.canvasWidth, this.canvasHeight) * 0.35;
           if (dt > 180 && dist > maxJump) {
             this.strokes.push(this.currentRemoteStroke);
             this.currentRemoteStroke = null;
+            this.remoteOneEuro.reset();
+            const remoteHrNow = typeof performance !== 'undefined' ? performance.now() : Date.now();
+            if (this.precisionMode === 'proAdaptive') {
+              this.remoteOneEuro.filter(rawX, rawY, remoteHrNow);
+            }
+            this.remoteRecentPointsForSmoothing = [{ x: rawX, y: rawY }];
+            smoothX = rawX;
+            smoothY = rawY;
+            smoothNormX = normX;
+            smoothNormY = normY;
           }
         }
 
@@ -1189,7 +1341,7 @@ export class DrawingEngine {
         if (this.currentRemoteStroke && this.currentRemoteStroke.points.length > 0) {
           const last = this.currentRemoteStroke.points[this.currentRemoteStroke.points.length - 1];
           const dt = Math.max(1, now - last.timestamp);
-          const dist = Math.hypot(rawX - last.x, rawY - last.y);
+          const dist = Math.hypot(smoothX - last.x, smoothY - last.y);
           velocity = dist / dt;
           prevWidth = last.width;
         }
@@ -1207,10 +1359,10 @@ export class DrawingEngine {
             id: 'remote_' + Date.now() + '_' + Math.random().toString(36).substring(2, 6),
             points: [
               {
-                x: rawX,
-                y: rawY,
-                normX,
-                normY,
+                x: smoothX,
+                y: smoothY,
+                normX: smoothNormX,
+                normY: smoothNormY,
                 pressure: smoothedP,
                 pointerType: isRemoteEraser ? 'eraser' : event.pointerType || 'stylus',
                 width,
@@ -1229,10 +1381,10 @@ export class DrawingEngine {
           };
         } else {
           this.currentRemoteStroke.points.push({
-            x: rawX,
-            y: rawY,
-            normX,
-            normY,
+            x: smoothX,
+            y: smoothY,
+            normX: smoothNormX,
+            normY: smoothNormY,
             pressure: smoothedP,
             pointerType: isRemoteEraser ? 'eraser' : event.pointerType || 'stylus',
             width,
@@ -1242,7 +1394,7 @@ export class DrawingEngine {
           });
         }
       }
-      this.notify();
+      this.notifyMoveThrottled();
     } else if (event.type === 'pointerUp' || event.type === 'pointerCancel') {
       if (this.currentRemoteStroke) {
         if (isRemoteEraser && this.currentRemoteStroke.settings.mode !== 'eraser') {
@@ -1250,6 +1402,34 @@ export class DrawingEngine {
             ...this.currentRemoteStroke.settings,
             mode: 'eraser',
           };
+        }
+        if (event.type === 'pointerUp' && this.currentRemoteStroke.points.length > 0) {
+          const last = this.currentRemoteStroke.points[this.currentRemoteStroke.points.length - 1];
+          const now = event.timestamp || Date.now();
+          const dt = Math.max(1, now - last.timestamp);
+          const dist = Math.hypot(rawX - last.x, rawY - last.y);
+          const maxJump = Math.max(this.canvasWidth, this.canvasHeight) * 0.35;
+          if (dist >= 0.35 && !(dt > 180 && dist > maxJump)) {
+            const width = this.calculatePointWidth(
+              last.pressure,
+              dist / dt,
+              last.width,
+              this.currentRemoteStroke.settings.mode,
+              remoteBaseWidth
+            );
+            this.currentRemoteStroke.points.push({
+              x: rawX,
+              y: rawY,
+              normX,
+              normY,
+              pressure: last.pressure,
+              pointerType: isRemoteEraser ? 'eraser' : event.pointerType || 'stylus',
+              width,
+              timestamp: now,
+              tiltX: event.tiltX,
+              tiltY: event.tiltY,
+            });
+          }
         }
         this.strokes.push(this.currentRemoteStroke);
         this.currentRemoteStroke = null;

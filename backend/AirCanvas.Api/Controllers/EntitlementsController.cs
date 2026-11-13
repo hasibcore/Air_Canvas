@@ -1,4 +1,6 @@
 using System.Security.Claims;
+using System.Security.Cryptography;
+using System.Text;
 using AirCanvas.Api.Models;
 using AirCanvas.Api.Services;
 using Microsoft.AspNetCore.Authorization;
@@ -12,28 +14,33 @@ public class EntitlementsController : ControllerBase
 {
     private readonly IEntitlementService _entitlementService;
     private readonly ILogger<EntitlementsController> _logger;
+    private readonly IConfiguration _config;
 
-    public EntitlementsController(IEntitlementService entitlementService, ILogger<EntitlementsController> logger)
+    public EntitlementsController(
+        IEntitlementService entitlementService,
+        ILogger<EntitlementsController> logger,
+        IConfiguration config)
     {
         _entitlementService = entitlementService;
         _logger = logger;
+        _config = config;
     }
 
     /// <summary>
-    /// Returns the authoritative plan and feature entitlement for the current user.
-    /// Only TWO plans exist: FREE and PRO.
+    /// Returns the authoritative plan and feature entitlement for the authenticated JWT user.
+    /// Only TWO plans exist: FREE and PRO. Unauthenticated callers receive FREE without header spoofing.
     /// </summary>
     [HttpGet]
     [ProducesResponseType(typeof(EntitlementResponse), StatusCodes.Status200OK)]
     public async Task<IActionResult> GetCurrentEntitlement()
     {
-        // Extract authenticated user ID from JWT or header fallback
-        var userIdStr = User.FindFirstValue(ClaimTypes.NameIdentifier) 
-            ?? Request.Headers["X-User-Id"].FirstOrDefault();
+        // Only trust verified JWT claims — never trust spoofable X-User-Id headers
+        var userIdStr = User.Identity?.IsAuthenticated == true
+            ? (User.FindFirstValue(ClaimTypes.NameIdentifier) ?? User.FindFirstValue("sub"))
+            : null;
 
         if (string.IsNullOrWhiteSpace(userIdStr) || !Guid.TryParse(userIdStr, out var userId))
         {
-            // Anonymous / Unauthenticated users default to FREE plan
             return Ok(new EntitlementResponse
             {
                 Plan = "FREE",
@@ -55,12 +62,37 @@ public class EntitlementsController : ControllerBase
     }
 
     /// <summary>
-    /// Explicit entitlement lookup by User ID (used by C# Windows host and trusted clients)
+    /// Entitlement lookup by User ID — requires matching authenticated JWT owner or valid internal service API key.
     /// </summary>
     [HttpGet("{userId:guid}")]
     [ProducesResponseType(typeof(EntitlementResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
     public async Task<IActionResult> GetEntitlementByUserId(Guid userId)
     {
+        var expectedServiceKey = _config["Licensing:InternalServiceApiKey"];
+        var providedServiceKey = Request.Headers["X-Service-Api-Key"].FirstOrDefault();
+        bool hasValidServiceKey =
+            !string.IsNullOrWhiteSpace(expectedServiceKey) &&
+            !string.IsNullOrWhiteSpace(providedServiceKey) &&
+            CryptographicOperations.FixedTimeEquals(
+                Encoding.UTF8.GetBytes(expectedServiceKey),
+                Encoding.UTF8.GetBytes(providedServiceKey));
+
+        if (!hasValidServiceKey)
+        {
+            if (User.Identity?.IsAuthenticated != true)
+            {
+                return Unauthorized(new { error = "Authentication required." });
+            }
+
+            var authUserStr = User.FindFirstValue(ClaimTypes.NameIdentifier) ?? User.FindFirstValue("sub");
+            if (!Guid.TryParse(authUserStr, out var authUserId) || authUserId != userId)
+            {
+                return Forbid();
+            }
+        }
+
         var entitlement = await _entitlementService.GetUserEntitlementsAsync(userId);
         return Ok(entitlement);
     }

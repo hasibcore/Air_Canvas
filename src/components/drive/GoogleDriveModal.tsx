@@ -203,7 +203,7 @@ export const GoogleDriveModal: React.FC<GoogleDriveModalProps> = ({
       onClose();
     } catch (err: unknown) {
       console.error(err);
-      alert('Error loading drawing: ' + (err instanceof Error ? err.message : 'Unknown error'));
+      setFileListError('Error loading drawing: ' + (err instanceof Error ? err.message : 'Unknown error'));
     } finally {
       setLoadingFileId(null);
     }
@@ -219,7 +219,8 @@ export const GoogleDriveModal: React.FC<GoogleDriveModalProps> = ({
       setFileToDelete(null);
     } catch (err: unknown) {
       console.error(err);
-      alert('Failed to delete file: ' + (err instanceof Error ? err.message : 'Unknown error'));
+      setFileListError('Failed to delete file: ' + (err instanceof Error ? err.message : 'Unknown error'));
+      setFileToDelete(null);
     } finally {
       setIsDeleting(false);
     }

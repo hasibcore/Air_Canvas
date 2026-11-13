@@ -97,7 +97,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({
         <div className="relative z-10 max-w-4xl mx-auto space-y-6">
           <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-cyan-500/10 border border-cyan-500/30 text-cyan-400 text-xs font-bold tracking-wide">
             <Sparkles className="w-3.5 h-3.5" />
-            <span>v2.1.2 PRO RELEASED • 100% MOBILE PAD ➔ 1:1 PC WORKING AREA</span>
+            <span>v2.1.3 PRO RELEASED • 100% MOBILE PAD ➔ 1:1 PC WORKING AREA</span>
           </div>
 
           <h1 className="text-4xl sm:text-6xl md:text-7xl font-black tracking-tight text-white leading-tight">

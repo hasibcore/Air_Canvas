@@ -1,5 +1,9 @@
+using System.Security.Claims;
+using System.Security.Cryptography;
+using System.Text;
 using AirCanvas.Api.Models;
 using AirCanvas.Api.Services;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
 namespace AirCanvas.Api.Controllers;
@@ -72,18 +76,34 @@ public class SubscriptionsController : ControllerBase
     }
 
     /// <summary>
-    /// Flutter app sends Google Play purchaseToken here for server-side verification.
-    /// The Flutter client NEVER unlocks PRO client-side directly.
+    /// Flutter app sends Google Play purchaseToken here for authenticated server-side verification.
+    /// Ownership is bound to the validated JWT user ID so users cannot activate purchases for arbitrary accounts.
     /// </summary>
+    [Authorize]
     [HttpPost("google-play/verify")]
     [ProducesResponseType(typeof(PurchaseVerificationResult), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
     public async Task<IActionResult> VerifyGooglePlayPurchase([FromBody] VerifyPurchaseRequest request)
     {
         if (request == null || string.IsNullOrWhiteSpace(request.PurchaseToken))
         {
             return BadRequest(new { success = false, message = "Purchase token is required." });
         }
+
+        var authUserIdStr = User.FindFirstValue(ClaimTypes.NameIdentifier) ?? User.FindFirstValue("sub");
+        if (!Guid.TryParse(authUserIdStr, out var authenticatedUserId))
+        {
+            return Unauthorized(new { success = false, message = "Valid user identity is required." });
+        }
+
+        if (request.UserId != Guid.Empty && request.UserId != authenticatedUserId)
+        {
+            return Forbid();
+        }
+
+        request.UserId = authenticatedUserId;
 
         var result = await _entitlementService.VerifyAndProcessGooglePlayPurchaseAsync(request);
         if (!result.Success)
@@ -106,11 +126,24 @@ public class SubscriptionsController : ControllerBase
 
     /// <summary>
     /// Google Cloud Pub/Sub Webhook for Google Play Real-Time Developer Notifications (RTDN).
-    /// Automatically handles renewals, cancellations, grace periods, and expirations.
+    /// Requires a configured shared webhook secret verified in constant time.
     /// </summary>
     [HttpPost("google-play/rtdn")]
     public async Task<IActionResult> HandleGooglePlayRtdnWebhook([FromBody] GooglePlayRtdnNotification notification)
     {
+        var expectedSecret = _config["GooglePlay:RtdnWebhookSecret"];
+        var providedSecret = Request.Headers["X-Webhook-Secret"].FirstOrDefault()
+            ?? Request.Query["token"].FirstOrDefault();
+
+        if (string.IsNullOrWhiteSpace(expectedSecret) ||
+            string.IsNullOrWhiteSpace(providedSecret) ||
+            !CryptographicOperations.FixedTimeEquals(
+                Encoding.UTF8.GetBytes(expectedSecret),
+                Encoding.UTF8.GetBytes(providedSecret)))
+        {
+            return Unauthorized(new { error = "Invalid or missing webhook authorization." });
+        }
+
         try
         {
             var processed = await _entitlementService.HandleGooglePlayRtdnAsync(notification);

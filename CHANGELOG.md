@@ -4,6 +4,19 @@ All notable changes to **Air Canvas** are documented in this file.
 
 ---
 
+## [2.1.3] — 2026-11-13
+
+### Fixed & Hardened
+- **Live Drawing Precision & Stroke Continuity**:
+  - Preserved final release coordinates on `pointerUp` across `DrawingEngine`, `DrawingCanvas`, `DrawingStudio`, Flutter (`lib/main.dart`), and Windows C# (`AirCanvasServer.cs`), while strictly emitting `pressure = 0` on pen lift.
+  - Reset `remoteOneEuro` filters on orphan `pointerMove` events and matched SVG/4K export Bézier smoothing (`pts.length >= 3`) to live canvas rendering.
+  - Guarded fast continuous swipes with `dtMs > 160` + `dist > 0.35`, clamped Win32 absolute coordinates to `[0, 65535]`, and preserved cropped `workingAreaDetected` bounds across subsequent `screen_sync` broadcasts.
+- **Connection Watchdogs, Relay Pairing & CI Release Pipeline**:
+  - Added heartbeat `lastPongAt` (`> 8500ms`) stale-socket watchdogs in Web `ConnectionManager` and Flutter `lib/main.dart`, dynamic `register_host` room-switch notifications, non-phantom `discovery_empty` responses, and `/health` dev middleware parity in `vite.config.ts`.
+  - Synced `public/AirCanvasServer.cs` byte-for-byte with `AirCanvasServer.cs`, hardened `AirCanvas.Api` / `edusite_backend` / Supabase constraints (`tests/security_and_unit_suite.mjs` + `tests/e2e_drawing_and_connection_qa.mjs`), and deduplicated GitHub Actions `build-release.yml` runs with `concurrency` for `v2.1.3` APK + EXE builds.
+
+---
+
 ## [2.0.5] — 2026-11-07
 
 ### Added

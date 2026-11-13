@@ -412,3 +412,121 @@ Every finding below follows the Appendix D.1 template with exact `path:line` cit
 - **Status**: FIXED AND VERIFIED — V1, V2 (`audit/logs/calibration_suite.log` Suite C).
 - **Evidence**: `src/services/targetGeometryManager.ts:196-266`, `AirCanvasServer.cs:550-585`
 
+---
+
+### BUG-024: Landing Page JS `SyntaxError` & Implicit Global `event.target` in `switchTab`
+- **Component**: Landing Page (`landing_page/script.js`, `landing_page/index.html`)
+- **Severity**: P0 | **Confidence**: CONFIRMED
+- **Root cause**: Line 79 missed opening backtick on template string (`Authorization: \`Bearer ...\``), crashing entire script parse; `switchTab(tabId)` relied on deprecated global `event.target`.
+- **Fix strategy**: Fixed template literal syntax, added explicit `buttonEl` parameter (`switchTab('...', this)`), DOM null-guards, and `rel="noopener noreferrer"` on external `target="_blank"` links.
+- **Status**: FIXED AND VERIFIED — V2 (`node tests/security_and_unit_suite.mjs` passes VM compile + tab switch assertions).
+
+---
+
+### BUG-025: Cross-Tenant `discovery_ping` Broadcast Could Leak Host LAN IP & Metadata Across PIN Rooms
+- **Component**: Relay Server (`server.js`, `vite.config.ts`)
+- **Severity**: P1 | **Confidence**: CONFIRMED
+- **Root cause**: Fallback scan in `discovery_ping` iterated global `roomSyncState` across rooms rather than staying scoped strictly to the caller's PIN room.
+- **Fix strategy**: Replaced global fallback loop with O(1) PIN-scoped lookup (`roomSyncState.get(meta.pin)`).
+- **Status**: FIXED AND VERIFIED — V2/V3 (`node tests/security_and_unit_suite.mjs` confirms Room 2222 client never receives Room 1111 Host IP).
+
+---
+
+### BUG-026: Blocking File I/O, Unbounded Request Timeouts, Brute-Force Push Route & Control-Char Log Injection
+- **Component**: Relay Server (`server.js`, `vite.config.ts`)
+- **Severity**: P1 | **Confidence**: CONFIRMED
+- **Root cause**: Static serving used synchronous `fs.readFileSync`; missing `try/catch` around `decodeURIComponent`; no HTTP server timeouts; uncapped `/api/github-push`; control characters logged raw.
+- **Fix strategy**: Switched to async `fsp.stat`/`fsp.readFile` + bounded `<= 1 MiB` in-memory `staticCache`, canonical path containment + `400` on malformed URI/null bytes, HTTP `requestTimeout`/`headersTimeout`/`keepAliveTimeout`, sliding-window IP rate limit (`429`) on `/api/github-push`, log sanitization, and graceful `SIGTERM`/`SIGINT` shutdown.
+- **Status**: FIXED AND VERIFIED — V2/V3 (`node tests/security_and_unit_suite.mjs` + `node tests/load_test_suite.mjs`).
+
+---
+
+### BUG-027: Vite Dev Relay Security & Backpressure Parity Gap
+- **Component**: Vite Dev Plugin (`vite.config.ts`)
+- **Severity**: P1 | **Confidence**: CONFIRMED
+- **Root cause**: Dev WS relay omitted `MAX_ROOMS`, `MAX_PEERS_PER_ROOM`, `MAX_MESSAGES_PER_SEC`, binary frame validation, heartbeat eviction, and `bufferedAmount` backpressure.
+- **Fix strategy**: Implemented full hardening parity with `server.js` inside `vite.config.ts`.
+- **Status**: FIXED AND VERIFIED — V1/V3 (`compile_applet` + live dev server port 3000 verification).
+
+---
+
+### BUG-028: Web `LicenseService` Ignored `currentPeriodEnd` Expiration & Mutated Date Helpers
+- **Component**: Web Studio (`src/services/licenseService.ts`)
+- **Severity**: P1 | **Confidence**: CONFIRMED
+- **Root cause**: `loadFromStorage()` and `getEntitlement()` trusted `tier === 'pro'` even when `currentPeriodEnd` was in the past; malformed JSON crashed load or retained stale state.
+- **Fix strategy**: Added `currentPeriodEnd <= Date.now()` expiration downgrade (unless `GRACE_PERIOD`), isolated `nextYear` date construction, and safe storage parsing.
+- **Status**: FIXED AND VERIFIED — V2 (`node tests/security_and_unit_suite.mjs` `LicenseService` unit suite).
+
+---
+
+### BUG-029: Web Studio Event Listener Leak, `window.alert` Inside iFrame, & Unencoded Drive `fileId`
+- **Component**: Web Studio (`src/services/connectionManager.ts`, `src/components/drive/GoogleDriveModal.tsx`, `src/services/googleDriveService.ts`)
+- **Severity**: P1 | **Confidence**: CONFIRMED
+- **Root cause**: `connect()` attached un-removed `resize` listeners and omitted clearing `recentBinarySigs`/`outboundQueue`; modal called `window.alert`; `fileId` interpolated raw in Google Drive API URLs.
+- **Fix strategy**: Stored single `resizeHandler`, cleared queues/sigs on disconnect, replaced `alert` with inline `fileListError` state, and wrapped `fileId` in `encodeURIComponent`.
+- **Status**: FIXED AND VERIFIED — V1 (`compile_applet` + `lint_applet` exit 0).
+
+---
+
+### BUG-030: C# WebSocket Broadcast Held `_clientsLock` During Blocking Network I/O + Unbounded Sockets
+- **Component**: Windows C# Server (`AirCanvasServer.cs`, `public/AirCanvasServer.cs`)
+- **Severity**: P1 | **Confidence**: CONFIRMED
+- **Root cause**: `BroadcastWsTextMessage` / `BroadcastWsBinary` called synchronous `client.Write` + `Flush` inside `lock (_clientsLock)`; uncapped sockets/threads, undisposed `SHA1`, unescaped JSON fields.
+- **Fix strategy**: Snapshotted `_activeClients` under lock, wrote outside lock and pruned dead streams afterward (`PruneDeadStreams`), bounded sockets (`MAX_CONCURRENT_SOCKETS=64`, `MAX_WS_CLIENTS=32`), disposed `SHA1`, set `SendTimeout=2000`, escaped JSON values (strictly C# 5 compatible), and kept `AirCanvasServer.cs === public/AirCanvasServer.cs` byte-identical.
+- **Status**: FIXED, VERIFICATION INCOMPLETE — V0 (`run_calibration_tests.js` asserts file sync + Win32 invariants; `dotnet`/`csc` unavailable in container).
+
+---
+
+### BUG-031: C# Desktop HTTP Server Unbounded Threads, Raw URI Decoding, & Unescaped HTML
+- **Component**: Windows Desktop App (`AirCanvasDesktop.cs`)
+- **Severity**: P1 | **Confidence**: CONFIRMED
+- **Root cause**: Spawned `new Thread` per request, skipped `Uri.UnescapeDataString` and null-byte rejection prior to `Path.GetFullPath`, interpolated unencoded version/IP in HTML.
+- **Fix strategy**: Switched to `ThreadPool.QueueUserWorkItem`, added timeouts (reset on WS upgrade), URL-decoded paths + null-byte `400`, `WebUtility.HtmlEncode`, `EscapeJson`, and `X-Content-Type-Options: nosniff`.
+- **Status**: FIXED, VERIFICATION INCOMPLETE — V0 (static audit; no `.NET` runtime in container).
+
+---
+
+### BUG-032: C# Licensing Ignored Expiration Timestamp Once `PRO` Set & Lacked Auth Headers
+- **Component**: Windows C# Licensing (`AirCanvasLicensing.cs`)
+- **Severity**: P1 | **Confidence**: CONFIRMED
+- **Root cause**: `IsPro` only checked `CurrentPlan == "PRO"`; date parse lacked UTC normalization; missing `X-Service-Api-Key`/Bearer helpers.
+- **Fix strategy**: Enforced `(!ExpiryDate.HasValue || ExpiryDate.Value > DateTime.UtcNow)`, normalized UTC parsing, added `ConfigureServiceApiKey`/`ConfigureBearerToken`, URL-escaped `userId`, and warned on plain `http://` non-loopback endpoints.
+- **Status**: FIXED, VERIFICATION INCOMPLETE — V0 (static audit; no `dotnet` SDK).
+
+---
+
+### BUG-033: ASP.NET Core Billing API Open CORS, Unauthenticated Endpoints, Spoofable `X-User-Id`, & Dev JWT Fallback
+- **Component**: `backend/AirCanvas.Api` (`Program.cs`, `Controllers/SubscriptionsController.cs`, `Controllers/EntitlementsController.cs`, `appsettings.json`)
+- **Severity**: P0 | **Confidence**: CONFIRMED
+- **Root cause**: `AllowAnyOrigin()`, hardcoded fallback JWT key in non-dev, disabled lifetime validation, missing `[Authorize]` on `VerifyGooglePlayPurchase`, spoofable `X-User-Id` fallback on entitlements, and unauthenticated RTDN webhook.
+- **Fix strategy**: Added explicit `Cors:AllowedOrigins`, fail-closed non-dev JWT secret validation + `ValidateLifetime`, `[Authorize]` + JWT `sub` check, constant-time `CryptographicOperations.FixedTimeEquals` for `X-Service-Api-Key` and `X-Webhook-Secret`, and HSTS/security headers.
+- **Status**: FIXED, VERIFICATION INCOMPLETE — V0 (static audit; no `dotnet` SDK in container).
+
+---
+
+### BUG-034: Billing DB Persistence Fail-Open, Missing SQL Unique Indexes, & Secret Token Logging
+- **Component**: `backend/AirCanvas.Api/Services/*`, `supabase/migrations/20261008000000_security_and_constraints.sql`
+- **Severity**: P0 | **Confidence**: CONFIRMED
+- **Root cause**: `EntitlementService` returned `Success=true` when Postgres upsert threw, logged raw `purchaseToken` secrets, lacked unique indexes on `purchase_token` / `(purchase_token, order_id)`, mapped RTDN `12` incorrectly, and SQL RPC returned snake_case keys instead of camelCase expected by clients.
+- **Fix strategy**: Failed closed on DB errors, redacted logged tokens, added unique/partial constraints in new SQL migration + aligned `highPollingRate`/`ultraLowLatency` camelCase keys, gated Google Play dev simulation on `_env.IsDevelopment() && AllowDevSimulation`, and mapped RTDN `12 -> REVOKED`.
+- **Status**: FIXED, VERIFICATION INCOMPLETE — V0 (static audit; no `dotnet`/PostgreSQL daemon in container).
+
+---
+
+### BUG-035: `edusite_backend` Missing JWT Algorithm Pinning & User Enumeration Timing Channel
+- **Component**: `edusite_backend` (`src/middleware/auth.js`, `src/routes/auth.js`)
+- **Severity**: P1 | **Confidence**: CONFIRMED
+- **Root cause**: `jwt.verify` lacked `algorithms: ['HS256']`; `/login` bypassed `bcrypt.compare` on missing email enabling timing-based email discovery.
+- **Fix strategy**: Pinned `{ algorithms: ['HS256'] }`, validated `sub`, and ran constant-time `DUMMY_PASSWORD_HASH` comparison when account does not exist.
+- **Status**: FIXED AND VERIFIED — V2 (`node --test ./edusite_backend/test/auth.test.js` 4/4 pass).
+
+---
+
+### BUG-036: `edusite_backend` Missing Pool/Statement Timeouts, Readiness Probe, Error Mapping & Graceful Shutdown
+- **Component**: `edusite_backend` (`src/config.js`, `src/db.js`, `src/routes/health.js`, `src/middleware/error-handler.js`, `src/server.js`)
+- **Severity**: P1 | **Confidence**: CONFIRMED
+- **Root cause**: No `max`/`statement_timeout` bounds, no `/health/ready`, inconsistent JSON/Zod/CORS error status codes, and no `SIGTERM`/`SIGINT` DB pool draining.
+- **Fix strategy**: Added `DB_POOL_MAX`/`DB_STATEMENT_TIMEOUT_MS`, `GET /health/ready` (`SELECT 1` -> 200/503), `400`/`403`/`413` error mapping hiding internals, exported `createApp()`, and added `SIGTERM`/`SIGINT` graceful shutdown.
+- **Status**: FIXED AND VERIFIED — V2 (`node --test ./edusite_backend/test/auth.test.js` 4/4 pass).
+
+

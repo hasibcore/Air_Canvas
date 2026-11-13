@@ -100,13 +100,37 @@ export class LicenseService {
       const stored = localStorage.getItem('aircanvas_license_v1');
       if (stored) {
         const parsed = JSON.parse(stored);
-        if (parsed.tier === 'free' || parsed.tier === 'pro') {
-          this.currentTier = parsed.tier;
-          this.licenseKey = parsed.licenseKey || '';
-          this.licenseName = parsed.licenseName || (parsed.tier === 'pro' ? 'Air Canvas Pro Studio' : 'Air Canvas Free');
-          this.isTrial = Boolean(parsed.isTrial);
-          this.currentSubscription = parsed.currentSubscription || null;
-          this.purchasesHistory = parsed.purchasesHistory || [];
+        if (parsed && typeof parsed === 'object' && (parsed.tier === 'free' || parsed.tier === 'pro')) {
+          const sub = parsed.currentSubscription && typeof parsed.currentSubscription === 'object'
+            ? (parsed.currentSubscription as SubscriptionRecord)
+            : null;
+          const periodEndMs = sub?.currentPeriodEnd ? Date.parse(sub.currentPeriodEnd) : NaN;
+          const isExpired =
+            sub !== null &&
+            sub.status !== 'GRACE_PERIOD' &&
+            Number.isFinite(periodEndMs) &&
+            periodEndMs <= Date.now();
+
+          if (isExpired) {
+            this.currentTier = 'free';
+            this.licenseKey = '';
+            this.licenseName = 'Air Canvas Free Edition';
+            this.isTrial = false;
+            this.currentSubscription = { ...sub, status: 'EXPIRED' };
+            this.saveToStorage();
+          } else {
+            this.currentTier = parsed.tier;
+            this.licenseKey = typeof parsed.licenseKey === 'string' ? parsed.licenseKey : '';
+            this.licenseName =
+              typeof parsed.licenseName === 'string' && parsed.licenseName
+                ? parsed.licenseName
+                : parsed.tier === 'pro'
+                  ? 'Air Canvas Pro Studio'
+                  : 'Air Canvas Free';
+            this.isTrial = Boolean(parsed.isTrial);
+            this.currentSubscription = sub;
+          }
+          this.purchasesHistory = Array.isArray(parsed.purchasesHistory) ? parsed.purchasesHistory : [];
         }
       }
     } catch (e) {
@@ -231,10 +255,36 @@ export class LicenseService {
   // Authoritative Entitlement Contract (Source of Truth)
   public getEntitlement(): EntitlementPayload {
     if (this.currentTier === 'pro') {
-      const now = new Date();
-      const expires = this.currentSubscription 
-        ? this.currentSubscription.currentPeriodEnd 
-        : new Date(now.setFullYear(now.getFullYear() + 1)).toISOString();
+      if (this.currentSubscription) {
+        const periodEndMs = Date.parse(this.currentSubscription.currentPeriodEnd);
+        const subExpired =
+          this.currentSubscription.status === 'EXPIRED' ||
+          this.currentSubscription.status === 'ON_HOLD' ||
+          (this.currentSubscription.status !== 'GRACE_PERIOD' &&
+            Number.isFinite(periodEndMs) &&
+            periodEndMs <= Date.now());
+        if (subExpired) {
+          return {
+            plan: 'FREE',
+            status: 'EXPIRED',
+            expiresAt: this.currentSubscription.currentPeriodEnd,
+            features: {
+              basicDrawing: true,
+              advancedCalibration: false,
+              multiMonitor: false,
+              advancedSettings: false,
+              ultraLowLatency: false,
+              highPollingRate: false,
+            },
+          };
+        }
+      }
+
+      const nextYear = new Date();
+      nextYear.setFullYear(nextYear.getFullYear() + 1);
+      const expires = this.currentSubscription
+        ? this.currentSubscription.currentPeriodEnd
+        : nextYear.toISOString();
 
       return {
         plan: 'PRO',

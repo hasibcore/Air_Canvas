@@ -288,9 +288,10 @@ namespace AirCanvas
                 try
                 {
                     TcpClient client = _httpListener.AcceptTcpClient();
-                    Thread t = new Thread(() => HandleClientHttpRequest(client));
-                    t.IsBackground = true;
-                    t.Start();
+                    ThreadPool.QueueUserWorkItem(delegate(object state)
+                    {
+                        HandleClientHttpRequest((TcpClient)state);
+                    }, client);
                 }
                 catch
                 {
@@ -299,12 +300,20 @@ namespace AirCanvas
             }
         }
 
+        private static string EscapeJson(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return "";
+            return s.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\r", "").Replace("\n", "");
+        }
+
         private static void HandleClientHttpRequest(TcpClient client)
         {
             NetworkStream stream = null;
             try
             {
                 client.NoDelay = true;
+                client.SendTimeout = 5000;
+                client.ReceiveTimeout = 5000;
                 stream = client.GetStream();
 
                 string requestText = AirCanvasServer.ReadHttpHeader(stream);
@@ -317,6 +326,7 @@ namespace AirCanvas
                 // Support WebSocket connections directly on the Desktop HTTP Port (3005) as well as Port 9090
                 if (requestText.IndexOf("upgrade: websocket", StringComparison.OrdinalIgnoreCase) >= 0)
                 {
+                    try { client.ReceiveTimeout = 0; client.SendTimeout = 2000; } catch { }
                     AirCanvasServer.HandleWebSocketStream(client, stream, requestText);
                     return;
                 }
@@ -335,7 +345,20 @@ namespace AirCanvas
                     return;
                 }
 
-                string rawPath = requestLine[1].Split('?')[0].TrimStart('/');
+                string encodedPath = requestLine[1].Split('?')[0];
+                string decodedPath;
+                try { decodedPath = Uri.UnescapeDataString(encodedPath); }
+                catch { decodedPath = encodedPath; }
+
+                if (decodedPath.IndexOf('\0') >= 0)
+                {
+                    byte[] badBytes = Encoding.ASCII.GetBytes("HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 11\r\n\r\nBad Request");
+                    stream.Write(badBytes, 0, badBytes.Length);
+                    try { client.Close(); } catch { }
+                    return;
+                }
+
+                string rawPath = decodedPath.TrimStart('/');
 
                 // LAN Discovery / Network-Info Endpoint for Mobile Pair Detection
                 if (rawPath == "api/network-info" || rawPath == "api/ip")
@@ -343,11 +366,13 @@ namespace AirCanvas
                     string primaryIp = AirCanvasServer.GetPrimaryLocalIp();
                     string allIpsJson = AirCanvasServer.GetAllLocalIpsJsonArray();
                     int connectedTablets = AirCanvasServer.GetConnectedTabletCount();
-                    string json = "{\"ip\":\"" + primaryIp + "\",\"allIps\":" + allIpsJson + ",\"webPort\":" + _httpPort + ",\"serverPort\":9090,\"pin\":\"1234\",\"connectedTablets\":" + connectedTablets + ",\"version\":\"" + AirCanvasServer.VERSION + "\"}";
+                    string json = "{\"ip\":\"" + EscapeJson(primaryIp) + "\",\"allIps\":" + allIpsJson + ",\"webPort\":" + _httpPort + ",\"serverPort\":9090,\"pin\":\"1234\",\"connectedTablets\":" + connectedTablets + ",\"version\":\"" + EscapeJson(AirCanvasServer.VERSION) + "\"}";
                     byte[] jsonBytes = Encoding.UTF8.GetBytes(json);
                     string header = "HTTP/1.1 200 OK\r\n" +
                                     "Content-Type: application/json; charset=utf-8\r\n" +
                                     "Content-Length: " + jsonBytes.Length + "\r\n" +
+                                    "Cache-Control: no-store\r\n" +
+                                    "X-Content-Type-Options: nosniff\r\n" +
                                     "Access-Control-Allow-Origin: *\r\n" +
                                     "Connection: close\r\n\r\n";
                     byte[] hBytes = Encoding.UTF8.GetBytes(header);
@@ -394,6 +419,7 @@ namespace AirCanvas
                         string header = "HTTP/1.1 200 OK\r\n" +
                                         "Content-Type: " + contentType + "\r\n" +
                                         "Content-Length: " + fileBytes.Length + "\r\n" +
+                                        "X-Content-Type-Options: nosniff\r\n" +
                                         "Connection: close\r\n" +
                                         "Access-Control-Allow-Origin: *\r\n\r\n";
 
@@ -406,20 +432,21 @@ namespace AirCanvas
                 }
 
                 // Built-in Standalone HTML Dashboard when AirCanvas.exe is downloaded directly without dist/ folder
-                string ipNow = AirCanvasServer.GetPrimaryLocalIp();
-                string fallbackHtml = "<!DOCTYPE html><html><head><meta charset='utf-8'><title>Air Canvas v" + AirCanvasServer.VERSION + "</title>" +
+                string safeIp = WebUtility.HtmlEncode(AirCanvasServer.GetPrimaryLocalIp());
+                string safeVersion = WebUtility.HtmlEncode(AirCanvasServer.VERSION);
+                string fallbackHtml = "<!DOCTYPE html><html><head><meta charset='utf-8'><title>Air Canvas v" + safeVersion + "</title>" +
                     "<style>body{background:#0A0A14;color:#fff;font-family:Segoe UI,sans-serif;padding:32px;max-width:680px;margin:0 auto;}" +
                     ".card{background:#141628;border:1px solid #00E5FF55;border-radius:14px;padding:24px;margin-top:20px;}" +
                     ".ip{font-size:28px;font-weight:bold;color:#00E676;font-family:Consolas,monospace;margin:12px 0;}</style></head><body>" +
-                    "<h2 style='color:#00E5FF;margin:0'>Air Canvas v" + AirCanvasServer.VERSION + " — Windows PC Host</h2>" +
+                    "<h2 style='color:#00E5FF;margin:0'>Air Canvas v" + safeVersion + " — Windows PC Host</h2>" +
                     "<div class='card'><div id='st' style='color:#FFD600;font-weight:bold'>Listening for Android Tablet on Port 9090...</div>" +
-                    "<div class='ip'>IP: " + ipNow + "  |  Port: 9090</div>" +
-                    "<p style='color:#aaa;font-size:14px'>Open the Air Canvas app on your Android phone/tablet on the same Wi-Fi. It will auto-detect and connect to <b>" + ipNow + ":9090</b> automatically.</p></div>" +
+                    "<div class='ip'>IP: " + safeIp + "  |  Port: 9090</div>" +
+                    "<p style='color:#aaa;font-size:14px'>Open the Air Canvas app on your Android phone/tablet on the same Wi-Fi. It will auto-detect and connect to <b>" + safeIp + ":9090</b> automatically.</p></div>" +
                     "<script>setInterval(function(){fetch('/api/network-info').then(function(r){return r.json()}).then(function(d){" +
                     "var el=document.getElementById('st');if(d.connectedTablets>0){el.style.color='#00E676';el.innerText='CONNECTED ('+d.connectedTablets+' Tablet Active on '+d.ip+':9090)';}" +
                     "else{el.style.color='#FFD600';el.innerText='Waiting for Android / Tablet on '+d.ip+':9090...';}});},1000);</script></body></html>";
                 byte[] htmlBytes = Encoding.UTF8.GetBytes(fallbackHtml);
-                string htmlHeader = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: " + htmlBytes.Length + "\r\nConnection: close\r\n\r\n";
+                string htmlHeader = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: " + htmlBytes.Length + "\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n";
                 byte[] htmlHeaderBytes = Encoding.UTF8.GetBytes(htmlHeader);
                 stream.Write(htmlHeaderBytes, 0, htmlHeaderBytes.Length);
                 stream.Write(htmlBytes, 0, htmlBytes.Length);

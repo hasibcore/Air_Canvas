@@ -4,9 +4,10 @@ const config = require('./config');
 const pool = new Pool({
   connectionString: config.databaseUrl,
   ssl: config.dbSslMode === 'require' ? { rejectUnauthorized: true } : false,
-  max: 10,
+  max: config.dbPoolMax,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 5000,
+  statement_timeout: config.dbStatementTimeoutMs,
 });
 
 pool.on('error', (err) => {
@@ -17,4 +18,8 @@ async function query(text, params = []) {
   return pool.query(text, params);
 }
 
-module.exports = { pool, query };
+async function closePool() {
+  await pool.end();
+}
+
+module.exports = { pool, query, closePool };

@@ -1,4 +1,4 @@
-name: Build and Release AirCanvas v2.1.2
+name: Build and Release AirCanvas v2.1.3
 
 on:
   push:
@@ -8,12 +8,16 @@ on:
       - main
   workflow_dispatch:
 
+concurrency:
+  group: aircanvas-release-${{ (github.ref_type == 'tag' && github.ref_name) || 'v2.1.3' }}
+  cancel-in-progress: true
+
 permissions:
   contents: write
 
 jobs:
   build-windows:
-    name: Build Windows v2.1.2 Release (.exe + Web Studio)
+    name: Build Windows v2.1.3 Release (.exe + Web Studio)
     runs-on: windows-latest
     steps:
       - name: Checkout repository
@@ -24,21 +28,22 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Build & Verify v2.1.2 Web Studio, Phase 4.10 Target Mapping & V4 Suites
+      - name: Build & Verify v2.1.3 Web Studio, Phase 4.10 Target Mapping & V4 Suites
         run: |
           npm install
           npm run lint
           node run_calibration_tests.js
           node test_live_dual_device.js
+          node tests/security_and_unit_suite.mjs
           npm run build
 
-      - name: Compile Native Windows Desktop & Server Executables (v2.1.2)
+      - name: Compile Native Windows Desktop & Server Executables (v2.1.3)
         shell: cmd
         run: |
           C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe /target:winexe /win32manifest:app.manifest /win32icon:app.ico /out:AirCanvas.exe /main:AirCanvas.Program /optimize+ /r:System.Drawing.dll /r:System.Windows.Forms.dll /r:System.dll AirCanvasServer.cs AirCanvasDesktop.cs
           C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe /target:exe /win32manifest:app.manifest /win32icon:app.ico /out:AirCanvasServer.exe /main:AirCanvas.Server.AirCanvasServer /optimize+ /r:System.Drawing.dll /r:System.Windows.Forms.dll /r:System.dll AirCanvasServer.cs
 
-      - name: Compress Windows v2.1.2 Release Bundle
+      - name: Compress Windows v2.1.3 Release Bundle
         shell: pwsh
         run: |
           Compress-Archive -Path AirCanvas.exe, AirCanvasServer.exe, dist, Fix_Firewall.bat, Start_AirCanvas_USB.bat, app.ico, PROJECT_AUDIT.md, AUDIT_CHECKPOINT.md -DestinationPath AirCanvas-Windows-x64.zip -Force
@@ -56,7 +61,7 @@ jobs:
 
 
   build-android:
-    name: Build Android v2.1.2 APK (.apk)
+    name: Build Android v2.1.3 APK (.apk)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -114,8 +119,8 @@ jobs:
       - name: Install dependencies
         run: flutter pub get
 
-      - name: Build Android Release APK (v2.1.2)
-        run: flutter build apk --release --build-name=2.1.2 --build-number=212
+      - name: Build Android Release APK (v2.1.3)
+        run: flutter build apk --release --build-name=2.1.3 --build-number=213
 
       - name: Align and Sign APK with v1, v2, and v3 Signature Schemes
         run: |
@@ -159,7 +164,7 @@ jobs:
           path: AirCanvas-release.apk
 
   release:
-    name: Create GitHub Release (v2.1.2)
+    name: Create GitHub Release (v2.1.3)
     needs: [build-windows, build-android]
     if: always() && (needs.build-windows.result == 'success' || needs.build-android.result == 'success')
     runs-on: ubuntu-latest
@@ -177,8 +182,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          tag_name: ${{ (github.ref_type == 'tag' && github.ref_name) || 'v2.1.2' }}
-          name: AirCanvas ${{ (github.ref_type == 'tag' && github.ref_name) || 'v2.1.2' }} - 100% Connected Outbound TLS Auto-Bridge, 1:1 Ratio/Rotation & Offline Queue
+          tag_name: ${{ (github.ref_type == 'tag' && github.ref_name) || 'v2.1.3' }}
+          name: AirCanvas ${{ (github.ref_type == 'tag' && github.ref_name) || 'v2.1.3' }} - Hardened Dual-Device Relay, Stroke Precision & Offline Queue
           files: |
             release-assets/*
           draft: false

@@ -10,6 +10,8 @@ const envSchema = z.object({
   BCRYPT_ROUNDS: z.coerce.number().int().min(10).max(14).default(12),
   REQUIRE_HTTPS: z.enum(['true', 'false']).default('true'),
   DB_SSL_MODE: z.enum(['require', 'disable']).default('require'),
+  DB_POOL_MAX: z.coerce.number().int().min(1).max(100).default(20),
+  DB_STATEMENT_TIMEOUT_MS: z.coerce.number().int().min(500).max(60000).default(5000),
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -30,4 +32,6 @@ module.exports = {
   bcryptRounds: env.BCRYPT_ROUNDS,
   requireHttps: env.REQUIRE_HTTPS === 'true',
   dbSslMode: env.DB_SSL_MODE,
+  dbPoolMax: env.DB_POOL_MAX,
+  dbStatementTimeoutMs: env.DB_STATEMENT_TIMEOUT_MS,
 };

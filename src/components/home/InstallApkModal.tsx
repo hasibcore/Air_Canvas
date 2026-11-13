@@ -68,11 +68,11 @@ export const InstallApkModal: React.FC<InstallApkModalProps> = ({ isOpen, onClos
               <div className="flex items-center gap-2">
                 <h3 className="text-lg font-bold text-white">Install AirCanvas on Mobile</h3>
                 <span className="px-2 py-0.5 rounded-full text-[10px] font-mono font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
-                  v2.1.2 APK
+                  v2.1.3 APK
                 </span>
               </div>
               <p className="text-xs text-slate-400 mt-0.5">
-                Scan with phone camera or click to download directly (v2.1.2 Full-Screen Pad)
+                Scan with phone camera or click to download directly (v2.1.3 Full-Screen Pad)
               </p>
             </div>
           </div>

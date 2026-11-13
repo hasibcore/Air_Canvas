@@ -84,6 +84,8 @@ export class ConnectionManager {
   private cloudBridgeWs: WebSocket | null = null;
   private outboundQueue: string[] = [];
   private pingInterval: number | null = null;
+  private lastPongAt = 0;
+  private cloudBridgeReconnectTimer: any = null;
   private listeners: Set<() => void> = new Set();
 
   public isLinkVerified = false;
@@ -457,6 +459,7 @@ export class ConnectionManager {
         this.ws = socket;
 
         socket.onopen = () => {
+          this.lastPongAt = Date.now();
           this.relayState = 'connected';
           this.connectedEndpoint = `${this.localIp}:${this.serverPort}`;
           if (!this.isSimulatedOffline) {
@@ -541,6 +544,10 @@ export class ConnectionManager {
     role: 'server' | 'client' = 'server'
   ): void {
     if (typeof window === 'undefined') return;
+    if (this.cloudBridgeReconnectTimer) {
+      clearTimeout(this.cloudBridgeReconnectTimer);
+      this.cloudBridgeReconnectTimer = null;
+    }
     try {
       if (this.cloudBridgeWs) {
         try {
@@ -558,6 +565,7 @@ export class ConnectionManager {
       this.cloudBridgeWs = cws;
 
       cws.onopen = () => {
+        this.lastPongAt = Date.now();
         this.relayState = 'connected';
         if (!this.isSimulatedOffline) {
           this.state = 'connected';
@@ -598,6 +606,21 @@ export class ConnectionManager {
           } else if (typeof ev.data === 'string' && (ev.data.includes('pointer') || ev.data.includes('input_event') || ev.data.includes('workArea') || ev.data.includes('action') || ev.data.includes('brush_update'))) {
             try { this.localServerWs.send(ev.data); } catch {}
           }
+        }
+      };
+
+      cws.onclose = () => {
+        if (this.cloudBridgeWs === cws) {
+          this.cloudBridgeWs = null;
+        }
+        if (!this.isSimulatedOffline && (this.mode === 'server' || this.state === 'connected')) {
+          if (this.cloudBridgeReconnectTimer) clearTimeout(this.cloudBridgeReconnectTimer);
+          this.cloudBridgeReconnectTimer = setTimeout(() => {
+            this.cloudBridgeReconnectTimer = null;
+            if (!this.isSimulatedOffline && !this.cloudBridgeWs && (this.mode === 'server' || this.state === 'connected')) {
+              this.connectCloudHostBridge(pin, relayHost, role);
+            }
+          }, 3500);
         }
       };
 
@@ -650,6 +673,10 @@ export class ConnectionManager {
       clearTimeout(this.hostReconnectTimer);
       this.hostReconnectTimer = null;
     }
+    if (this.cloudBridgeReconnectTimer) {
+      clearTimeout(this.cloudBridgeReconnectTimer);
+      this.cloudBridgeReconnectTimer = null;
+    }
     if (this.ws) {
       try {
         this.ws.onclose = null;
@@ -684,6 +711,10 @@ export class ConnectionManager {
       clearTimeout(this.hostReconnectTimer);
       this.hostReconnectTimer = null;
     }
+    if (this.cloudBridgeReconnectTimer) {
+      clearTimeout(this.cloudBridgeReconnectTimer);
+      this.cloudBridgeReconnectTimer = null;
+    }
     if (this.ws) {
       try {
         this.ws.onclose = null;
@@ -706,6 +737,9 @@ export class ConnectionManager {
       this.cloudBridgeWs = null;
     }
     this.stopHeartbeat();
+    this.recentBinarySigs.clear();
+    this.recentMsgSigs.clear();
+    this.outboundQueue = [];
     this.relayState = 'disconnected';
     this.state = 'disconnected';
     this.connectedDeviceName = '';
@@ -743,6 +777,7 @@ export class ConnectionManager {
   }
 
   private processIncomingSocketData(raw: any, sourceWs?: WebSocket): void {
+    this.lastPongAt = Date.now();
     if (raw instanceof ArrayBuffer) {
       this.decodeBinaryPacket(raw);
       return;
@@ -951,7 +986,7 @@ export class ConnectionManager {
       if (data.type === 'input_event' && data.event) {
         const evTs = data.timestamp ?? data.event.timestamp;
         if (evTs) {
-          const evSig = `ev:${data.senderId || ''}:${data.event.type}:${data.event.x}:${data.event.y}:${data.event.pressure}:${evTs}`;
+          const evSig = `ev:${data.senderId || ''}:${data.event.type}:${data.event.x}:${data.event.y}:${data.event.pressure}:${data.event.sequenceNumber ?? ''}:${evTs}`;
           if (this.isDuplicateSignature(this.recentMsgSigs, evSig)) return;
         }
         if (this.state !== 'connected') {
@@ -1483,6 +1518,7 @@ export class ConnectionManager {
 
         // Connected successfully!
         this.ws = socket;
+        this.lastPongAt = Date.now();
         this.relayState = 'connected';
         this.transportType = cand.modeType;
         this.state = 'connected';
@@ -1517,13 +1553,16 @@ export class ConnectionManager {
         };
 
         socket.onclose = () => {
-          if (this.ws === socket) {
-            this.ws = null;
+          if (this.ws !== socket) {
+            return;
           }
+          this.ws = null;
           this.relayState = 'disconnected';
           // Auto-reconnect in background if client was connected
           if (this.mode === 'client' && this.state === 'connected' && !this.isSimulatedOffline) {
+            if (this.hostReconnectTimer) clearTimeout(this.hostReconnectTimer);
             this.hostReconnectTimer = setTimeout(() => {
+              this.hostReconnectTimer = null;
               if (this.mode === 'client' && !this.isSimulatedOffline) {
                 this.connectToServer(ip, port, cleanPin, cand.modeType);
               }
@@ -2009,6 +2048,10 @@ export class ConnectionManager {
       clearTimeout(this.hostReconnectTimer);
       this.hostReconnectTimer = null;
     }
+    if (this.cloudBridgeReconnectTimer) {
+      clearTimeout(this.cloudBridgeReconnectTimer);
+      this.cloudBridgeReconnectTimer = null;
+    }
     this.bc?.postMessage({
       type: 'disconnect',
       senderId: this.id,
@@ -2041,6 +2084,8 @@ export class ConnectionManager {
     this.connectedDeviceName = '';
     this.remoteDeviceInfo = null;
     this.stopHeartbeat();
+    this.recentBinarySigs.clear();
+    this.recentMsgSigs.clear();
     // If we are the Host PC and restarting wasn't suppressed (e.g. stopServer()), resume listening
     if (restartHost && this.mode === 'server') {
       this.startServer(this.pairingPin || '1234');
@@ -2063,6 +2108,7 @@ export class ConnectionManager {
       socket.binaryType = 'arraybuffer';
       this.ws = socket;
       socket.onopen = () => {
+        this.lastPongAt = Date.now();
         this.relayState = 'connected';
         this.state = 'connected';
         this.connectedDeviceName = this.connectedDeviceName || `PC Host (PIN: ${pin})`;
@@ -2075,8 +2121,8 @@ export class ConnectionManager {
       socket.onclose = () => {
         if (this.ws === socket) {
           this.ws = null;
+          this.relayState = 'disconnected';
         }
-        this.relayState = 'disconnected';
       };
     } catch {}
   }
@@ -2156,9 +2202,14 @@ export class ConnectionManager {
     this.enqueueOrSend(JSON.stringify(payload));
   }
 
+  private resizeHandler: (() => void) | null = null;
+
   private setupScreenResizeListener(): void {
     if (typeof window === 'undefined') return;
-    const updateAndBroadcast = () => {
+    if (this.resizeHandler) {
+      window.removeEventListener('resize', this.resizeHandler);
+    }
+    this.resizeHandler = () => {
       const w = Math.max(320, window.innerWidth || window.screen?.width || 1920);
       const h = Math.max(240, window.innerHeight || window.screen?.height || 1080);
       if (this.mode === 'server') {
@@ -2167,7 +2218,7 @@ export class ConnectionManager {
         this.broadcastScreenDimensions(w, h);
       }
     };
-    window.addEventListener('resize', updateAndBroadcast);
+    window.addEventListener('resize', this.resizeHandler);
   }
 
   public broadcastScreenDimensions(width?: number, height?: number): void {
@@ -2248,13 +2299,27 @@ export class ConnectionManager {
 
   private startHeartbeat(): void {
     this.stopHeartbeat();
+    this.lastPongAt = Date.now();
     this.pingInterval = window.setInterval(() => {
       if (this.state === 'connected' && !this.isSimulatedOffline) {
+        const now = Date.now();
+        // Watchdog: detect silent half-open WebSocket stalls when primary socket is open but no pong/frame arrived in > 8s
+        if (
+          this.ws &&
+          this.ws.readyState === WebSocket.OPEN &&
+          this.lastPongAt > 0 &&
+          now - this.lastPongAt > 8500
+        ) {
+          try {
+            this.ws.close(4000, 'Heartbeat pong timeout');
+          } catch {}
+          return;
+        }
         const pingMsg = {
           type: 'ping',
           senderId: this.id,
           senderMode: this.mode,
-          timestamp: Date.now(),
+          timestamp: now,
         };
         this.bc?.postMessage(pingMsg);
         const serialized = JSON.stringify(pingMsg);

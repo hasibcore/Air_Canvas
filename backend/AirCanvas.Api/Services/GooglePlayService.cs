@@ -1,19 +1,22 @@
 using Google.Apis.AndroidPublisher.v3;
 using Google.Apis.Auth.OAuth2;
 using Google.Apis.Services;
+using Microsoft.Extensions.Hosting;
 
 namespace AirCanvas.Api.Services;
 
 public class GooglePlayService : IGooglePlayService
 {
     private readonly IConfiguration _config;
+    private readonly IHostEnvironment _env;
     private readonly ILogger<GooglePlayService> _logger;
     private readonly string _packageName;
     private readonly HashSet<string> _supportedProducts;
 
-    public GooglePlayService(IConfiguration config, ILogger<GooglePlayService> logger)
+    public GooglePlayService(IConfiguration config, IHostEnvironment env, ILogger<GooglePlayService> logger)
     {
         _config = config;
+        _env = env;
         _logger = logger;
         _packageName = _config["GooglePlay:PackageName"] ?? "com.aircanvas.app";
 
@@ -79,11 +82,10 @@ public class GooglePlayService : IGooglePlayService
                     AcknowledgementState = purchase.AcknowledgementState == 1 ? "ACKNOWLEDGED" : "PENDING"
                 };
             }
-            else
+            else if (_env.IsDevelopment() && _config.GetValue<bool>("GooglePlay:AllowDevSimulation"))
             {
-                // In Development/Staging without Google Play credentials, provide deterministic verification
-                _logger.LogInformation("Simulating Google Play verification for token: {Token} (Dev Mode)", purchaseToken);
-                
+                _logger.LogInformation("Simulating Google Play verification in explicit Development simulation mode for product {ProductId}", productId);
+
                 var isYearly = productId.Equals("aircanvas_pro_yearly", StringComparison.OrdinalIgnoreCase);
                 var now = DateTime.UtcNow;
                 var expiry = isYearly ? now.AddYears(1) : now.AddMonths(1);
@@ -99,6 +101,15 @@ public class GooglePlayService : IGooglePlayService
                     AcknowledgementState = "ACKNOWLEDGED"
                 };
             }
+            else
+            {
+                _logger.LogError("Google Play service account key is missing and billing simulation is disabled.");
+                return new GooglePlaySubscriptionVerification
+                {
+                    IsValid = false,
+                    ErrorReason = "Google Play billing verification is not configured on the server."
+                };
+            }
         }
         catch (Exception ex)
         {
@@ -106,7 +117,7 @@ public class GooglePlayService : IGooglePlayService
             return new GooglePlaySubscriptionVerification
             {
                 IsValid = false,
-                ErrorReason = $"Google Play API Verification failed: {ex.Message}"
+                ErrorReason = "Google Play API verification failed."
             };
         }
     }
@@ -136,11 +147,11 @@ public class GooglePlayService : IGooglePlayService
                 await publisherService.Purchases.Subscriptions.Acknowledge(ackBody, _packageName, productId, purchaseToken).ExecuteAsync();
                 return true;
             }
-            return true;
+            return _env.IsDevelopment() && _config.GetValue<bool>("GooglePlay:AllowDevSimulation");
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to acknowledge purchase token {Token}", purchaseToken);
+            _logger.LogError(ex, "Failed to acknowledge subscription for product {ProductId}", productId);
             return false;
         }
     }

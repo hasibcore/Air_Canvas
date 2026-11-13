@@ -274,7 +274,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
             type="button"
             onClick={() => setShowGitHubModal(true)}
             className="h-8 sm:h-9 px-3 rounded-xl bg-slate-900 hover:bg-slate-800 border border-emerald-500/40 text-emerald-300 font-bold text-xs flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0"
-            title="Push & Release v2.1.2 APK and Windows EXE to GitHub (hasibcore/Air_Canvas)"
+            title="Push & Release v2.1.3 APK and Windows EXE to GitHub (hasibcore/Air_Canvas)"
           >
             <FolderGit2 className="w-3.5 h-3.5 shrink-0" />
             <span>Push & Release APK/EXE</span>

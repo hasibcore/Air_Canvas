@@ -24,6 +24,7 @@ import {
   HardDrive,
 } from 'lucide-react';
 import { DrawingEngine } from '../../services/drawingEngine.ts';
+import { OneEuroFilter2D } from '../../services/oneEuroFilter.ts';
 import { ConnectionManager } from '../../services/connectionManager.ts';
 import { Stroke, BrushMode } from '../../types/index.ts';
 import { LicenseService } from '../../services/licenseService.ts';
@@ -87,6 +88,8 @@ export const DrawingStudio: React.FC<DrawingStudioProps> = ({
   const [showDriveModal, setShowDriveModal] = useState(false);
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const bgCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const committedInkCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const inkCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const isDrawingRef = useRef(false);
@@ -97,7 +100,21 @@ export const DrawingStudio: React.FC<DrawingStudioProps> = ({
   } | null>(null);
   const suppressEngineSyncRef = useRef(false);
   const shapeStartRef = useRef<{ x: number; y: number } | null>(null);
-  const currentPtsRef = useRef<{ x: number; y: number; width: number }[]>([]);
+  const currentPtsRef = useRef<{ x: number; y: number; width: number; pressure: number }[]>([]);
+  const studioOneEuroRef = useRef<OneEuroFilter2D>(new OneEuroFilter2D(1.15, 0.018, 1.2));
+  const studioSmoothedPressureRef = useRef<number | null>(null);
+  const lastBgKeyRef = useRef<string>('');
+  const committedStateRef = useRef<{
+    pageId: string;
+    count: number;
+    firstId: string | null;
+    lastId: string | null;
+    w: number;
+    h: number;
+    dpr: number;
+  }>({ pageId: '', count: -1, firstId: null, lastId: null, w: 0, h: 0, dpr: 1 });
+  const studioDirtyRef = useRef<boolean>(true);
+  const lastEngineVersionRef = useRef<number>(-1);
 
   const currentPage = pages[activePageIndex] || pages[0];
 
@@ -223,11 +240,23 @@ export const DrawingStudio: React.FC<DrawingStudioProps> = ({
       canvas.style.width = `${width}px`;
       canvas.style.height = `${height}px`;
 
+      if (!bgCanvasRef.current) bgCanvasRef.current = document.createElement('canvas');
+      bgCanvasRef.current.width = width * dpr;
+      bgCanvasRef.current.height = height * dpr;
+
+      if (!committedInkCanvasRef.current) committedInkCanvasRef.current = document.createElement('canvas');
+      committedInkCanvasRef.current.width = width * dpr;
+      committedInkCanvasRef.current.height = height * dpr;
+
       if (!inkCanvasRef.current) {
         inkCanvasRef.current = document.createElement('canvas');
       }
       inkCanvasRef.current.width = width * dpr;
       inkCanvasRef.current.height = height * dpr;
+
+      lastBgKeyRef.current = '';
+      committedStateRef.current.count = -1;
+      studioDirtyRef.current = true;
 
       engine.updateCanvasDimensions(width, height);
     }
@@ -239,308 +268,413 @@ export const DrawingStudio: React.FC<DrawingStudioProps> = ({
     return () => window.removeEventListener('resize', handleResize);
   }, [handleResize]);
 
-  // Render loop
+  // Render loop (Cached Paper/Grid + Incremental Committed Strokes + Live Active Stroke)
   const render = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const ctx = canvas.getContext('2d');
+
+    if (
+      !studioDirtyRef.current &&
+      lastEngineVersionRef.current === engine.renderVersion
+    ) {
+      return;
+    }
+    studioDirtyRef.current = false;
+    lastEngineVersionRef.current = engine.renderVersion;
+
+    const ctx =
+      canvas.getContext('2d', { desynchronized: true } as CanvasRenderingContext2DSettings) ||
+      canvas.getContext('2d');
     if (!ctx) return;
 
     const dpr = window.devicePixelRatio || 1;
     const w = canvas.width / dpr;
     const h = canvas.height / dpr;
 
-    ctx.save();
-    ctx.scale(dpr, dpr);
-
-    // Background paper
+    // 1. Cached Static Paper & Grid Layer
+    if (!bgCanvasRef.current) bgCanvasRef.current = document.createElement('canvas');
+    const bgCanvas = bgCanvasRef.current;
+    if (bgCanvas.width !== canvas.width || bgCanvas.height !== canvas.height) {
+      bgCanvas.width = canvas.width;
+      bgCanvas.height = canvas.height;
+      lastBgKeyRef.current = '';
+    }
     const paper = currentPage.paperStyle;
-    if (paper === 'white') {
-      ctx.fillStyle = '#FFFFFF';
-      ctx.fillRect(0, 0, w, h);
-    } else {
-      ctx.fillStyle = '#07111D';
-      ctx.fillRect(0, 0, w, h);
-    }
+    const bgKey = `${canvas.width}x${canvas.height}:${dpr}:${paper}:${engine.backgroundImage ? engine.backgroundImage.src.length : 0}`;
 
-    if (engine.backgroundImage) {
-      ctx.drawImage(engine.backgroundImage, 0, 0, w, h);
-    }
+    if (lastBgKeyRef.current !== bgKey) {
+      const bgCtx = bgCanvas.getContext('2d');
+      if (bgCtx) {
+        lastBgKeyRef.current = bgKey;
+        bgCtx.save();
+        bgCtx.setTransform(1, 0, 0, 1, 0, 0);
+        bgCtx.scale(dpr, dpr);
 
-    // Grid / Ruled / Dots overlay
-    if (paper === 'grid') {
-      ctx.strokeStyle = 'rgba(0, 229, 255, 0.08)';
-      ctx.lineWidth = 1;
-      const step = 32;
-      ctx.beginPath();
-      for (let x = 0; x <= w; x += step) {
-        ctx.moveTo(x, 0);
-        ctx.lineTo(x, h);
-      }
-      for (let y = 0; y <= h; y += step) {
-        ctx.moveTo(0, y);
-        ctx.lineTo(w, y);
-      }
-      ctx.stroke();
-    } else if (paper === 'ruled') {
-      ctx.strokeStyle = 'rgba(0, 229, 255, 0.12)';
-      ctx.lineWidth = 1;
-      const step = 28;
-      ctx.beginPath();
-      for (let y = 30; y <= h; y += step) {
-        ctx.moveTo(0, y);
-        ctx.lineTo(w, y);
-      }
-      ctx.stroke();
-    } else if (paper === 'dots') {
-      ctx.fillStyle = 'rgba(0, 229, 255, 0.2)';
-      const step = 24;
-      for (let x = 12; x <= w; x += step) {
-        for (let y = 12; y <= h; y += step) {
-          ctx.beginPath();
-          ctx.arc(x, y, 1.2, 0, Math.PI * 2);
-          ctx.fill();
-        }
-      }
-    }
-
-    // Dedicated Offscreen Ink Layer so pixel eraser (destination-out) cleanly wipes only ink
-    // and never paints opaque lines over paper grids, dots, or background images
-    if (!inkCanvasRef.current) {
-      inkCanvasRef.current = document.createElement('canvas');
-    }
-    const inkCanvas = inkCanvasRef.current;
-    if (inkCanvas.width !== canvas.width || inkCanvas.height !== canvas.height) {
-      inkCanvas.width = canvas.width;
-      inkCanvas.height = canvas.height;
-    }
-    const inkCtx = inkCanvas.getContext('2d');
-
-    if (inkCtx) {
-      inkCtx.save();
-      inkCtx.setTransform(1, 0, 0, 1, 0, 0);
-      inkCtx.clearRect(0, 0, inkCanvas.width, inkCanvas.height);
-      inkCtx.scale(dpr, dpr);
-
-      const renderStrokeOnInk = (stroke: Stroke) => {
-        const pts = stroke.points;
-        if (pts.length === 0) return;
-
-        const spanW = Math.max(1, w - 1);
-        const spanH = Math.max(1, h - 1);
-        const getX = (p: (typeof pts)[0]) => (p.normX !== undefined ? p.normX * spanW : p.x);
-        const getY = (p: (typeof pts)[0]) => (p.normY !== undefined ? p.normY * spanH : p.y);
-
-        const isEraser =
-          stroke.settings.mode === 'eraser' || pts.some((p) => p.pointerType === 'eraser');
-
-        inkCtx.save();
-        if (isEraser) {
-          inkCtx.strokeStyle = 'rgba(0,0,0,1)';
-          inkCtx.fillStyle = 'rgba(0,0,0,1)';
-          inkCtx.globalAlpha = 1.0;
-          inkCtx.globalCompositeOperation = 'destination-out';
-        } else if (stroke.settings.mode === 'highlighter') {
-          inkCtx.strokeStyle = stroke.settings.color;
-          inkCtx.fillStyle = stroke.settings.color;
-          inkCtx.globalAlpha = 0.35;
-          inkCtx.globalCompositeOperation = 'source-over';
+        if (paper === 'white') {
+          bgCtx.fillStyle = '#FFFFFF';
+          bgCtx.fillRect(0, 0, w, h);
         } else {
-          inkCtx.strokeStyle = stroke.settings.color;
-          inkCtx.fillStyle = stroke.settings.color;
-          inkCtx.globalAlpha = stroke.settings.opacity;
-          inkCtx.globalCompositeOperation = 'source-over';
+          bgCtx.fillStyle = '#07111D';
+          bgCtx.fillRect(0, 0, w, h);
         }
 
-        inkCtx.lineCap = 'round';
-        inkCtx.lineJoin = 'round';
+        if (engine.backgroundImage) {
+          bgCtx.drawImage(engine.backgroundImage, 0, 0, w, h);
+        }
 
-        if (pts.length === 1) {
-          inkCtx.beginPath();
-          inkCtx.arc(getX(pts[0]), getY(pts[0]), Math.max(1, pts[0].width / 2), 0, Math.PI * 2);
-          inkCtx.fill();
-        } else if (!stroke.settings.smoothing || pts.length <= 5) {
-          // Linear path for geometric shapes (lines, rectangles, arrows)
-          inkCtx.lineWidth = isEraser
-            ? Math.max(4, (stroke.settings.baseWidth || 4) * 2.2)
-            : stroke.settings.baseWidth || 3;
-          inkCtx.beginPath();
-          inkCtx.moveTo(getX(pts[0]), getY(pts[0]));
-          for (let i = 1; i < pts.length; i++) {
-            inkCtx.lineTo(getX(pts[i]), getY(pts[i]));
+        if (paper === 'grid') {
+          bgCtx.strokeStyle = 'rgba(0, 229, 255, 0.08)';
+          bgCtx.lineWidth = 1;
+          const step = 32;
+          bgCtx.beginPath();
+          for (let x = 0; x <= w; x += step) {
+            bgCtx.moveTo(x, 0);
+            bgCtx.lineTo(x, h);
           }
-          inkCtx.stroke();
-        } else {
-          // Smooth curved interpolation for freehand drawing
-          for (let i = 0; i < pts.length - 1; i++) {
-            const p1 = pts[i];
-            const p2 = pts[i + 1];
-            inkCtx.lineWidth = Math.max(1, (p1.width + p2.width) / 2);
-            inkCtx.beginPath();
-            if (i === 0) {
-              inkCtx.moveTo(getX(p1), getY(p1));
-              inkCtx.lineTo((getX(p1) + getX(p2)) / 2, (getY(p1) + getY(p2)) / 2);
-            } else {
-              const prev = pts[i - 1];
-              inkCtx.moveTo((getX(prev) + getX(p1)) / 2, (getY(prev) + getY(p1)) / 2);
-              inkCtx.quadraticCurveTo(
-                getX(p1),
-                getY(p1),
-                (getX(p1) + getX(p2)) / 2,
-                (getY(p1) + getY(p2)) / 2
-              );
+          for (let y = 0; y <= h; y += step) {
+            bgCtx.moveTo(0, y);
+            bgCtx.lineTo(w, y);
+          }
+          bgCtx.stroke();
+        } else if (paper === 'ruled') {
+          bgCtx.strokeStyle = 'rgba(0, 229, 255, 0.12)';
+          bgCtx.lineWidth = 1;
+          const step = 28;
+          bgCtx.beginPath();
+          for (let y = 30; y <= h; y += step) {
+            bgCtx.moveTo(0, y);
+            bgCtx.lineTo(w, y);
+          }
+          bgCtx.stroke();
+        } else if (paper === 'dots') {
+          bgCtx.fillStyle = 'rgba(0, 229, 255, 0.2)';
+          const step = 24;
+          for (let x = 12; x <= w; x += step) {
+            for (let y = 12; y <= h; y += step) {
+              bgCtx.beginPath();
+              bgCtx.arc(x, y, 1.2, 0, Math.PI * 2);
+              bgCtx.fill();
             }
-            inkCtx.stroke();
           }
-          // Render final tail half-segment to exact stroke end
-          const pPrev = pts[pts.length - 2];
-          const pLast = pts[pts.length - 1];
-          inkCtx.lineWidth = Math.max(1, (pPrev.width + pLast.width) / 2);
-          inkCtx.beginPath();
-          inkCtx.moveTo((getX(pPrev) + getX(pLast)) / 2, (getY(pPrev) + getY(pLast)) / 2);
-          inkCtx.lineTo(getX(pLast), getY(pLast));
-          inkCtx.stroke();
         }
-        inkCtx.restore();
+
+        bgCtx.restore();
+      }
+    }
+
+    const renderStrokeOnInk = (targetCtx: CanvasRenderingContext2D, stroke: Stroke) => {
+      const pts = stroke.points;
+      if (pts.length === 0) return;
+
+      const spanW = Math.max(1, w - 1);
+      const spanH = Math.max(1, h - 1);
+      const getX = (p: (typeof pts)[0]) => (p.normX !== undefined ? p.normX * spanW : p.x);
+      const getY = (p: (typeof pts)[0]) => (p.normY !== undefined ? p.normY * spanH : p.y);
+
+      const isEraser =
+        stroke.settings.mode === 'eraser' || pts.some((p) => p.pointerType === 'eraser');
+
+      targetCtx.save();
+      if (isEraser) {
+        targetCtx.strokeStyle = 'rgba(0,0,0,1)';
+        targetCtx.fillStyle = 'rgba(0,0,0,1)';
+        targetCtx.globalAlpha = 1.0;
+        targetCtx.globalCompositeOperation = 'destination-out';
+      } else if (stroke.settings.mode === 'highlighter') {
+        targetCtx.strokeStyle = stroke.settings.color;
+        targetCtx.fillStyle = stroke.settings.color;
+        targetCtx.globalAlpha = 0.35;
+        targetCtx.globalCompositeOperation = 'source-over';
+      } else {
+        targetCtx.strokeStyle = stroke.settings.color;
+        targetCtx.fillStyle = stroke.settings.color;
+        targetCtx.globalAlpha = stroke.settings.opacity;
+        targetCtx.globalCompositeOperation = 'source-over';
+      }
+
+      targetCtx.lineCap = 'round';
+      targetCtx.lineJoin = 'round';
+
+      if (pts.length === 1) {
+        targetCtx.beginPath();
+        targetCtx.arc(getX(pts[0]), getY(pts[0]), Math.max(1, pts[0].width / 2), 0, Math.PI * 2);
+        targetCtx.fill();
+      } else if (!stroke.settings.smoothing || pts.length === 2) {
+        // Linear path for geometric shapes (lines, rectangles, arrows) or 2-point segments
+        targetCtx.lineWidth = isEraser
+          ? Math.max(4, (stroke.settings.baseWidth || 4) * 2.2)
+          : Math.max(1, (pts[0].width + pts[pts.length - 1].width) / 2 || stroke.settings.baseWidth || 3);
+        targetCtx.beginPath();
+        targetCtx.moveTo(getX(pts[0]), getY(pts[0]));
+        for (let i = 1; i < pts.length; i++) {
+          targetCtx.lineTo(getX(pts[i]), getY(pts[i]));
+        }
+        targetCtx.stroke();
+      } else {
+        // Smooth C1 midpoint quadratic Bézier interpolation for all freehand strokes (including short 3-5 pt flicks)
+        const p0 = pts[0];
+        const p1 = pts[1];
+        targetCtx.lineWidth = Math.max(0.9, (p0.width + p1.width) / 2);
+        targetCtx.beginPath();
+        targetCtx.moveTo(getX(p0), getY(p0));
+        targetCtx.lineTo((getX(p0) + getX(p1)) / 2, (getY(p0) + getY(p1)) / 2);
+        targetCtx.stroke();
+
+        for (let i = 1; i < pts.length - 1; i++) {
+          const prev = pts[i - 1];
+          const curr = pts[i];
+          const next = pts[i + 1];
+          targetCtx.lineWidth = Math.max(0.9, (prev.width + curr.width + next.width) / 3);
+          targetCtx.beginPath();
+          targetCtx.moveTo((getX(prev) + getX(curr)) / 2, (getY(prev) + getY(curr)) / 2);
+          targetCtx.quadraticCurveTo(
+            getX(curr),
+            getY(curr),
+            (getX(curr) + getX(next)) / 2,
+            (getY(curr) + getY(next)) / 2
+          );
+          targetCtx.stroke();
+        }
+        const pPrev = pts[pts.length - 2];
+        const pLast = pts[pts.length - 1];
+        targetCtx.lineWidth = Math.max(0.9, (pPrev.width + pLast.width) / 2);
+        targetCtx.beginPath();
+        targetCtx.moveTo((getX(pPrev) + getX(pLast)) / 2, (getY(pPrev) + getY(pLast)) / 2);
+        targetCtx.lineTo(getX(pLast), getY(pLast));
+        targetCtx.stroke();
+      }
+      targetCtx.restore();
+    };
+
+    // 2. Cached Incremental Committed Ink Layer
+    if (!committedInkCanvasRef.current) {
+      committedInkCanvasRef.current = document.createElement('canvas');
+    }
+    const committedCanvas = committedInkCanvasRef.current;
+    if (committedCanvas.width !== canvas.width || committedCanvas.height !== canvas.height) {
+      committedCanvas.width = canvas.width;
+      committedCanvas.height = canvas.height;
+      committedStateRef.current.count = -1;
+    }
+
+    const committedCtx = committedCanvas.getContext('2d');
+    if (committedCtx) {
+      const strokes = currentPage.strokes;
+      const count = strokes.length;
+      const firstId = count > 0 ? strokes[0].id : null;
+      const lastId = count > 0 ? strokes[count - 1].id : null;
+      const prev = committedStateRef.current;
+
+      const isIncrementalAppend =
+        prev.pageId === currentPage.id &&
+        prev.count >= 0 &&
+        prev.w === canvas.width &&
+        prev.h === canvas.height &&
+        prev.dpr === dpr &&
+        count === prev.count + 1 &&
+        (prev.count === 0 || prev.firstId === firstId);
+
+      const isIdentical =
+        prev.pageId === currentPage.id &&
+        prev.count === count &&
+        prev.w === canvas.width &&
+        prev.h === canvas.height &&
+        prev.dpr === dpr &&
+        prev.firstId === firstId &&
+        prev.lastId === lastId;
+
+      if (isIncrementalAppend) {
+        committedCtx.save();
+        committedCtx.setTransform(1, 0, 0, 1, 0, 0);
+        committedCtx.scale(dpr, dpr);
+        renderStrokeOnInk(committedCtx, strokes[count - 1]);
+        committedCtx.restore();
+      } else if (!isIdentical) {
+        committedCtx.save();
+        committedCtx.setTransform(1, 0, 0, 1, 0, 0);
+        committedCtx.clearRect(0, 0, committedCanvas.width, committedCanvas.height);
+        committedCtx.scale(dpr, dpr);
+        for (const stroke of strokes) {
+          renderStrokeOnInk(committedCtx, stroke);
+        }
+        committedCtx.restore();
+      }
+
+      committedStateRef.current = {
+        pageId: currentPage.id,
+        count,
+        firstId,
+        lastId,
+        w: canvas.width,
+        h: canvas.height,
+        dpr,
       };
-
-      // Draw completed strokes on current page
-      for (const stroke of currentPage.strokes) {
-        renderStrokeOnInk(stroke);
-      }
-
-      // Draw live incoming remote stroke from Mobile Pad
-      if (engine.currentRemoteStroke) {
-        renderStrokeOnInk(engine.currentRemoteStroke);
-      }
-
-      // Draw live local engine stroke if any
-      if (engine.currentStroke) {
-        renderStrokeOnInk(engine.currentStroke);
-      }
-
-      // Draw active studio mouse/stylus stroke or shape preview
-      if (isDrawingRef.current && currentPtsRef.current.length > 0) {
-        inkCtx.save();
-        const pts = currentPtsRef.current;
-        if (activeTool === 'eraser') {
-          inkCtx.strokeStyle = 'rgba(0,0,0,1)';
-          inkCtx.fillStyle = 'rgba(0,0,0,1)';
-          inkCtx.globalAlpha = 1.0;
-          inkCtx.globalCompositeOperation = 'destination-out';
-          inkCtx.lineWidth = Math.max(6, activeWidth * 2.2);
-        } else {
-          inkCtx.strokeStyle = activeColor;
-          inkCtx.fillStyle = activeColor;
-          inkCtx.globalAlpha = activeTool === 'highlighter' ? 0.35 : activeOpacity;
-          inkCtx.globalCompositeOperation = 'source-over';
-          inkCtx.lineWidth = activeWidth;
-        }
-        inkCtx.lineCap = 'round';
-        inkCtx.lineJoin = 'round';
-
-        if (['line', 'arrow', 'rect', 'circle'].includes(activeTool) && shapeStartRef.current) {
-          const start = shapeStartRef.current;
-          const end = pts[pts.length - 1];
-
-          if (activeTool === 'line') {
-            inkCtx.beginPath();
-            inkCtx.moveTo(start.x, start.y);
-            inkCtx.lineTo(end.x, end.y);
-            inkCtx.stroke();
-          } else if (activeTool === 'arrow') {
-            inkCtx.beginPath();
-            inkCtx.moveTo(start.x, start.y);
-            inkCtx.lineTo(end.x, end.y);
-            inkCtx.stroke();
-            const angle = Math.atan2(end.y - start.y, end.x - start.x);
-            const headlen = 15;
-            inkCtx.beginPath();
-            inkCtx.moveTo(end.x, end.y);
-            inkCtx.lineTo(
-              end.x - headlen * Math.cos(angle - Math.PI / 6),
-              end.y - headlen * Math.sin(angle - Math.PI / 6)
-            );
-            inkCtx.moveTo(end.x, end.y);
-            inkCtx.lineTo(
-              end.x - headlen * Math.cos(angle + Math.PI / 6),
-              end.y - headlen * Math.sin(angle + Math.PI / 6)
-            );
-            inkCtx.stroke();
-          } else if (activeTool === 'rect') {
-            inkCtx.strokeRect(start.x, start.y, end.x - start.x, end.y - start.y);
-          } else if (activeTool === 'circle') {
-            const rx = Math.abs(end.x - start.x) / 2;
-            const ry = Math.abs(end.y - start.y) / 2;
-            const cx = Math.min(start.x, end.x) + rx;
-            const cy = Math.min(start.y, end.y) + ry;
-            inkCtx.beginPath();
-            inkCtx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
-            inkCtx.stroke();
-          }
-        } else if (pts.length === 1) {
-          inkCtx.beginPath();
-          inkCtx.arc(pts[0].x, pts[0].y, Math.max(1, pts[0].width / 2), 0, Math.PI * 2);
-          inkCtx.fill();
-        } else {
-          for (let i = 0; i < pts.length - 1; i++) {
-            const p1 = pts[i];
-            const p2 = pts[i + 1];
-            inkCtx.lineWidth = Math.max(1, (p1.width + p2.width) / 2);
-            inkCtx.beginPath();
-            if (i === 0) {
-              inkCtx.moveTo(p1.x, p1.y);
-              inkCtx.lineTo((p1.x + p2.x) / 2, (p1.y + p2.y) / 2);
-            } else {
-              const prev = pts[i - 1];
-              inkCtx.moveTo((prev.x + p1.x) / 2, (prev.y + p1.y) / 2);
-              inkCtx.quadraticCurveTo(p1.x, p1.y, (p1.x + p2.x) / 2, (p1.y + p2.y) / 2);
-            }
-            inkCtx.stroke();
-          }
-          const pPrev = pts[pts.length - 2];
-          const pLast = pts[pts.length - 1];
-          inkCtx.lineWidth = Math.max(1, (pPrev.width + pLast.width) / 2);
-          inkCtx.beginPath();
-          inkCtx.moveTo((pPrev.x + pLast.x) / 2, (pPrev.y + pLast.y) / 2);
-          inkCtx.lineTo(pLast.x, pLast.y);
-          inkCtx.stroke();
-        }
-        inkCtx.restore();
-      }
-
-      inkCtx.restore();
-
-      // Composite Ink Layer onto the main Studio display canvas
-      ctx.save();
-      ctx.setTransform(1, 0, 0, 1, 0, 0);
-      ctx.drawImage(inkCanvas, 0, 0);
-      ctx.restore();
-
-      // Render live remote stylus/touch hover cursor from connected Mobile Pad
-      if (engine.predictedPosition) {
-        const px = engine.predictedPosition.x;
-        const py = engine.predictedPosition.y;
-        const isRemEraser = engine.brushSettings.mode === 'eraser';
-        ctx.save();
-        ctx.beginPath();
-        ctx.arc(px, py, isRemEraser ? 10 : 6, 0, Math.PI * 2);
-        ctx.strokeStyle = isRemEraser ? '#F43F5E' : '#00E5FF';
-        ctx.lineWidth = 1.75;
-        ctx.stroke();
-
-        ctx.beginPath();
-        ctx.arc(px, py, 2, 0, Math.PI * 2);
-        ctx.fillStyle = '#FFFFFF';
-        ctx.fill();
-        ctx.restore();
-      }
     }
 
+    // 3. Blit Background Layer
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.drawImage(bgCanvas, 0, 0);
+
+    // 4. Composite Ink Layer (fast blit when idle; active stroke overlay only while drawing)
+    const hasActiveOverlay =
+      Boolean(engine.currentRemoteStroke) ||
+      Boolean(engine.currentStroke) ||
+      (isDrawingRef.current && currentPtsRef.current.length > 0);
+
+    if (!hasActiveOverlay) {
+      ctx.drawImage(committedCanvas, 0, 0);
+    } else {
+      if (!inkCanvasRef.current) {
+        inkCanvasRef.current = document.createElement('canvas');
+      }
+      const inkCanvas = inkCanvasRef.current;
+      if (inkCanvas.width !== canvas.width || inkCanvas.height !== canvas.height) {
+        inkCanvas.width = canvas.width;
+        inkCanvas.height = canvas.height;
+      }
+      const inkCtx = inkCanvas.getContext('2d');
+      if (inkCtx) {
+        inkCtx.save();
+        inkCtx.setTransform(1, 0, 0, 1, 0, 0);
+        inkCtx.clearRect(0, 0, inkCanvas.width, inkCanvas.height);
+        inkCtx.drawImage(committedCanvas, 0, 0);
+        inkCtx.scale(dpr, dpr);
+
+        if (engine.currentRemoteStroke) {
+          renderStrokeOnInk(inkCtx, engine.currentRemoteStroke);
+        }
+        if (engine.currentStroke) {
+          renderStrokeOnInk(inkCtx, engine.currentStroke);
+        }
+
+        if (isDrawingRef.current && currentPtsRef.current.length > 0) {
+          inkCtx.save();
+          const pts = currentPtsRef.current;
+          if (activeTool === 'eraser') {
+            inkCtx.strokeStyle = 'rgba(0,0,0,1)';
+            inkCtx.fillStyle = 'rgba(0,0,0,1)';
+            inkCtx.globalAlpha = 1.0;
+            inkCtx.globalCompositeOperation = 'destination-out';
+            inkCtx.lineWidth = Math.max(6, activeWidth * 2.2);
+          } else {
+            inkCtx.strokeStyle = activeColor;
+            inkCtx.fillStyle = activeColor;
+            inkCtx.globalAlpha = activeTool === 'highlighter' ? 0.35 : activeOpacity;
+            inkCtx.globalCompositeOperation = 'source-over';
+            inkCtx.lineWidth = activeWidth;
+          }
+          inkCtx.lineCap = 'round';
+          inkCtx.lineJoin = 'round';
+
+          if (['line', 'arrow', 'rect', 'circle'].includes(activeTool) && shapeStartRef.current) {
+            const start = shapeStartRef.current;
+            const end = pts[pts.length - 1];
+
+            if (activeTool === 'line') {
+              inkCtx.beginPath();
+              inkCtx.moveTo(start.x, start.y);
+              inkCtx.lineTo(end.x, end.y);
+              inkCtx.stroke();
+            } else if (activeTool === 'arrow') {
+              inkCtx.beginPath();
+              inkCtx.moveTo(start.x, start.y);
+              inkCtx.lineTo(end.x, end.y);
+              inkCtx.stroke();
+              const angle = Math.atan2(end.y - start.y, end.x - start.x);
+              const headlen = 15;
+              inkCtx.beginPath();
+              inkCtx.moveTo(end.x, end.y);
+              inkCtx.lineTo(
+                end.x - headlen * Math.cos(angle - Math.PI / 6),
+                end.y - headlen * Math.sin(angle - Math.PI / 6)
+              );
+              inkCtx.moveTo(end.x, end.y);
+              inkCtx.lineTo(
+                end.x - headlen * Math.cos(angle + Math.PI / 6),
+                end.y - headlen * Math.sin(angle + Math.PI / 6)
+              );
+              inkCtx.stroke();
+            } else if (activeTool === 'rect') {
+              inkCtx.strokeRect(start.x, start.y, end.x - start.x, end.y - start.y);
+            } else if (activeTool === 'circle') {
+              const rx = Math.abs(end.x - start.x) / 2;
+              const ry = Math.abs(end.y - start.y) / 2;
+              const cx = Math.min(start.x, end.x) + rx;
+              const cy = Math.min(start.y, end.y) + ry;
+              inkCtx.beginPath();
+              inkCtx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
+              inkCtx.stroke();
+            }
+          } else if (pts.length === 1) {
+            inkCtx.beginPath();
+            inkCtx.arc(pts[0].x, pts[0].y, Math.max(1, pts[0].width / 2), 0, Math.PI * 2);
+            inkCtx.fill();
+          } else if (pts.length === 2) {
+            inkCtx.lineWidth = Math.max(0.9, (pts[0].width + pts[1].width) / 2);
+            inkCtx.beginPath();
+            inkCtx.moveTo(pts[0].x, pts[0].y);
+            inkCtx.lineTo(pts[1].x, pts[1].y);
+            inkCtx.stroke();
+          } else {
+            const p0 = pts[0];
+            const p1 = pts[1];
+            inkCtx.lineWidth = Math.max(0.9, (p0.width + p1.width) / 2);
+            inkCtx.beginPath();
+            inkCtx.moveTo(p0.x, p0.y);
+            inkCtx.lineTo((p0.x + p1.x) / 2, (p0.y + p1.y) / 2);
+            inkCtx.stroke();
+
+            for (let i = 1; i < pts.length - 1; i++) {
+              const prev = pts[i - 1];
+              const curr = pts[i];
+              const next = pts[i + 1];
+              inkCtx.lineWidth = Math.max(0.9, (prev.width + curr.width + next.width) / 3);
+              inkCtx.beginPath();
+              inkCtx.moveTo((prev.x + curr.x) / 2, (prev.y + curr.y) / 2);
+              inkCtx.quadraticCurveTo(curr.x, curr.y, (curr.x + next.x) / 2, (curr.y + next.y) / 2);
+              inkCtx.stroke();
+            }
+            const pPrev = pts[pts.length - 2];
+            const pLast = pts[pts.length - 1];
+            inkCtx.lineWidth = Math.max(0.9, (pPrev.width + pLast.width) / 2);
+            inkCtx.beginPath();
+            inkCtx.moveTo((pPrev.x + pLast.x) / 2, (pPrev.y + pLast.y) / 2);
+            inkCtx.lineTo(pLast.x, pLast.y);
+            inkCtx.stroke();
+          }
+          inkCtx.restore();
+        }
+
+        inkCtx.restore();
+        ctx.drawImage(inkCanvas, 0, 0);
+      }
+    }
     ctx.restore();
+
+    // 5. Render live remote stylus/touch hover cursor from connected Mobile Pad
+    if (engine.predictedPosition) {
+      ctx.save();
+      ctx.scale(dpr, dpr);
+      const px = engine.predictedPosition.x;
+      const py = engine.predictedPosition.y;
+      const isRemEraser = engine.brushSettings.mode === 'eraser';
+      ctx.beginPath();
+      ctx.arc(px, py, isRemEraser ? 10 : 6, 0, Math.PI * 2);
+      ctx.strokeStyle = isRemEraser ? '#F43F5E' : '#00E5FF';
+      ctx.lineWidth = 1.75;
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.arc(px, py, 2, 0, Math.PI * 2);
+      ctx.fillStyle = '#FFFFFF';
+      ctx.fill();
+      ctx.restore();
+    }
   }, [currentPage, activeColor, activeWidth, activeOpacity, activeTool, engine]);
 
   useEffect(() => {
+    studioDirtyRef.current = true;
     let animId: number;
     const loop = () => {
       render();
@@ -607,15 +741,24 @@ export const DrawingStudio: React.FC<DrawingStudioProps> = ({
     const rect = canvas.getBoundingClientRect();
     const x = e.clientX - rect.left;
     const y = e.clientY - rect.top;
-    const p = e.pressure > 0 && e.pressure <= 1 ? e.pressure : 0.5;
+    const rawP = e.pressure > 0 && e.pressure <= 1 ? e.pressure : 0.5;
+    studioSmoothedPressureRef.current = rawP;
+
+    const hrNow = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    studioOneEuroRef.current.reset();
+    if (engine.precisionMode !== 'rawDirect') {
+      studioOneEuroRef.current.filter(x, y, hrNow);
+    }
+
     const w =
       effectiveTool === 'eraser'
         ? Math.max(6, activeWidth * 2.2)
-        : Math.max(1, activeWidth * (0.45 + p * 0.85));
+        : Math.max(1, activeWidth * (0.45 + rawP * 0.85));
 
     isDrawingRef.current = true;
     shapeStartRef.current = { x, y };
-    currentPtsRef.current = [{ x, y, width: w }];
+    currentPtsRef.current = [{ x, y, width: w, pressure: rawP }];
+    studioDirtyRef.current = true;
 
     if (!['line', 'arrow', 'rect', 'circle'].includes(effectiveTool)) {
       const spanW = Math.max(1, rect.width - 1);
@@ -624,7 +767,7 @@ export const DrawingStudio: React.FC<DrawingStudioProps> = ({
       connection.sendInputEvent({
         x: Math.max(0, Math.min(1, x / spanW)),
         y: Math.max(0, Math.min(1, y / spanH)),
-        pressure: p,
+        pressure: rawP,
         type: 'pointerDown',
         pointerType: isEraser ? 'eraser' : 'stylus',
         pointerId: e.pointerId || 1,
@@ -647,35 +790,88 @@ export const DrawingStudio: React.FC<DrawingStudioProps> = ({
     if (!canvas) return;
 
     const rect = canvas.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
-    const p = e.pressure > 0 && e.pressure <= 1 ? e.pressure : 0.5;
+    const isShape = ['line', 'arrow', 'rect', 'circle'].includes(activeTool);
     const isEraserNow = activeTool === 'eraser' || engine.brushSettings.mode === 'eraser';
-    const w = isEraserNow
-      ? Math.max(6, activeWidth * 2.2)
-      : Math.max(1, activeWidth * (0.45 + p * 0.85));
+    const nativeEv = e.nativeEvent as PointerEvent & {
+      getCoalescedEvents?: () => PointerEvent[];
+    };
+    const coalesced =
+      !isShape && typeof nativeEv.getCoalescedEvents === 'function'
+        ? nativeEv.getCoalescedEvents()
+        : null;
+    const samples: Array<{ clientX: number; clientY: number; pressure: number; tiltX: number; tiltY: number; timeStamp: number }> =
+      coalesced && coalesced.length > 0
+        ? coalesced.map((ce) => ({
+            clientX: ce.clientX,
+            clientY: ce.clientY,
+            pressure: typeof ce.pressure === 'number' && ce.pressure > 0 && ce.pressure <= 1 ? ce.pressure : e.pressure,
+            tiltX: ce.tiltX || e.tiltX || 0,
+            tiltY: ce.tiltY || e.tiltY || 0,
+            timeStamp: ce.timeStamp || (typeof performance !== 'undefined' ? performance.now() : Date.now()),
+          }))
+        : [
+            {
+              clientX: e.clientX,
+              clientY: e.clientY,
+              pressure: e.pressure,
+              tiltX: e.tiltX || 0,
+              tiltY: e.tiltY || 0,
+              timeStamp: typeof performance !== 'undefined' ? performance.now() : Date.now(),
+            },
+          ];
 
-    currentPtsRef.current.push({ x, y, width: w });
+    const spanW = Math.max(1, rect.width - 1);
+    const spanH = Math.max(1, rect.height - 1);
 
-    if (!['line', 'arrow', 'rect', 'circle'].includes(activeTool)) {
-      const spanW = Math.max(1, rect.width - 1);
-      const spanH = Math.max(1, rect.height - 1);
-      connection.sendInputEvent({
-        x: Math.max(0, Math.min(1, x / spanW)),
-        y: Math.max(0, Math.min(1, y / spanH)),
-        pressure: p,
-        type: 'pointerMove',
-        pointerType: isEraserNow ? 'eraser' : 'stylus',
-        pointerId: e.pointerId || 1,
-        tiltX: e.tiltX || 0,
-        tiltY: e.tiltY || 0,
-        buttons: isEraserNow ? 33 : 1,
-        sequenceNumber: 0,
-        timestamp: Date.now(),
-        brushMode: isEraserNow ? 'eraser' : activeTool === 'highlighter' ? 'highlighter' : 'pen',
-        penFlags: isEraserNow ? 0x06 : 0x00,
-        shortcutKey: isEraserNow ? 'e' : 'b',
-      });
+    for (const s of samples) {
+      const rawX = s.clientX - rect.left;
+      const rawY = s.clientY - rect.top;
+      let fx = rawX;
+      let fy = rawY;
+      if (!isShape && engine.precisionMode !== 'rawDirect') {
+        const filtered = studioOneEuroRef.current.filter(rawX, rawY, s.timeStamp);
+        fx = Math.max(0, Math.min(rect.width, filtered.x));
+        fy = Math.max(0, Math.min(rect.height, filtered.y));
+      }
+
+      const lastPt = currentPtsRef.current[currentPtsRef.current.length - 1];
+      if (!isShape && lastPt && Math.hypot(fx - lastPt.x, fy - lastPt.y) < 0.35) {
+        continue;
+      }
+
+      const rawP = s.pressure > 0 && s.pressure <= 1 ? s.pressure : 0.5;
+      const prevP = studioSmoothedPressureRef.current ?? rawP;
+      const emaP = 0.28 * rawP + 0.72 * prevP;
+      const clampedDelta = Math.max(-0.075, Math.min(0.075, emaP - prevP));
+      const p = Math.max(0.05, Math.min(1.0, prevP + clampedDelta));
+      studioSmoothedPressureRef.current = p;
+
+      const targetW = isEraserNow
+        ? Math.max(6, activeWidth * 2.2)
+        : Math.max(1, activeWidth * (0.45 + p * 0.85));
+      const w = lastPt && !isEraserNow ? 0.35 * targetW + 0.65 * lastPt.width : targetW;
+
+      currentPtsRef.current.push({ x: fx, y: fy, width: w, pressure: p });
+      studioDirtyRef.current = true;
+
+      if (!isShape) {
+        connection.sendInputEvent({
+          x: Math.max(0, Math.min(1, fx / spanW)),
+          y: Math.max(0, Math.min(1, fy / spanH)),
+          pressure: p,
+          type: 'pointerMove',
+          pointerType: isEraserNow ? 'eraser' : 'stylus',
+          pointerId: e.pointerId || 1,
+          tiltX: s.tiltX,
+          tiltY: s.tiltY,
+          buttons: isEraserNow ? 33 : 1,
+          sequenceNumber: 0,
+          timestamp: Date.now(),
+          brushMode: isEraserNow ? 'eraser' : activeTool === 'highlighter' ? 'highlighter' : 'pen',
+          penFlags: isEraserNow ? 0x06 : 0x00,
+          shortcutKey: isEraserNow ? 'e' : 'b',
+        });
+      }
     }
   };
 
@@ -695,26 +891,45 @@ export const DrawingStudio: React.FC<DrawingStudioProps> = ({
 
     if (!isDrawingRef.current) return;
     isDrawingRef.current = false;
+    studioDirtyRef.current = true;
+    studioSmoothedPressureRef.current = null;
 
     const dpr = window.devicePixelRatio || 1;
     const canvasW = canvas ? Math.max(1, canvas.width / dpr) : 1920;
     const canvasH = canvas ? Math.max(1, canvas.height / dpr) : 1080;
 
+    if (e && canvas && Number.isFinite(e.clientX) && Number.isFinite(e.clientY)) {
+      const rect = canvas.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) {
+        const finalX = Math.max(0, Math.min(rect.width, e.clientX - rect.left));
+        const finalY = Math.max(0, Math.min(rect.height, e.clientY - rect.top));
+        const lastRaw = currentPtsRef.current[currentPtsRef.current.length - 1];
+        if (!lastRaw || Math.hypot(finalX - lastRaw.x, finalY - lastRaw.y) >= 0.35) {
+          currentPtsRef.current.push({
+            x: finalX,
+            y: finalY,
+            width: lastRaw ? lastRaw.width : activeWidth,
+            pressure: lastRaw ? lastRaw.pressure : 0.5,
+          });
+        }
+      }
+    }
+
     const pts = currentPtsRef.current;
     if (pts.length > 0) {
       const isEraserMode = activeTool === 'eraser' || engine.brushSettings.mode === 'eraser';
-      const makePt = (px: number, py: number, pw = activeWidth): Stroke['points'][number] => ({
+      const makePt = (px: number, py: number, pw = activeWidth, pp = 0.5): Stroke['points'][number] => ({
         x: px,
         y: py,
         normX: Math.max(0, Math.min(1, px / Math.max(1, canvasW - 1))),
         normY: Math.max(0, Math.min(1, py / Math.max(1, canvasH - 1))),
-        pressure: 0.5,
+        pressure: pp,
         pointerType: isEraserMode ? 'eraser' : 'mouse',
         width: pw,
         timestamp: Date.now(),
       });
 
-      let strokePoints: Stroke['points'] = pts.map((p) => makePt(p.x, p.y, p.width));
+      let strokePoints: Stroke['points'] = pts.map((p) => makePt(p.x, p.y, p.width, p.pressure));
 
       const isShapeTool = ['line', 'arrow', 'rect', 'circle'].includes(activeTool);
 
@@ -863,7 +1078,7 @@ export const DrawingStudio: React.FC<DrawingStudioProps> = ({
       }
 
       let d = `M ${getX(pts[0]).toFixed(1)} ${getY(pts[0]).toFixed(1)}`;
-      if (stroke.settings.smoothing && pts.length > 5) {
+      if (stroke.settings.smoothing && pts.length >= 3) {
         const m0x = ((getX(pts[0]) + getX(pts[1])) / 2).toFixed(1);
         const m0y = ((getY(pts[0]) + getY(pts[1])) / 2).toFixed(1);
         d += ` L ${m0x} ${m0y}`;
@@ -961,7 +1176,7 @@ export const DrawingStudio: React.FC<DrawingStudioProps> = ({
         inkCtx.beginPath();
         inkCtx.arc(get4kX(pts[0]), get4kY(pts[0]), Math.max(2, (pts[0].width || stroke.settings.baseWidth) * scaleX / 2), 0, Math.PI * 2);
         inkCtx.fill();
-      } else if (stroke.settings.smoothing && pts.length > 5) {
+      } else if (stroke.settings.smoothing && pts.length >= 3) {
         inkCtx.beginPath();
         inkCtx.moveTo(get4kX(pts[0]), get4kY(pts[0]));
         inkCtx.lineTo((get4kX(pts[0]) + get4kX(pts[1])) / 2, (get4kY(pts[0]) + get4kY(pts[1])) / 2);

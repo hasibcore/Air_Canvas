@@ -50,16 +50,22 @@ function initParticles() {
     }
 }
 
-function switchTab(tabId) {
+function switchTab(tabId, buttonEl) {
     const tabs = document.querySelectorAll('.tab-btn');
     tabs.forEach(tab => tab.classList.remove('active'));
-    
-    event.target.classList.add('active');
+
+    const activeBtn = buttonEl || (typeof event !== 'undefined' ? event.target : null);
+    if (activeBtn && activeBtn.classList) {
+        activeBtn.classList.add('active');
+    }
 
     const grids = document.querySelectorAll('.platforms-grid');
     grids.forEach(grid => grid.classList.add('hidden'));
 
-    document.getElementById(`${tabId}-grid`).classList.remove('hidden');
+    const targetGrid = document.getElementById(`${tabId}-grid`);
+    if (targetGrid) {
+        targetGrid.classList.remove('hidden');
+    }
 }
 
 function getApiBaseUrl() {
@@ -76,7 +82,7 @@ async function secureApiRequest(path, options = {}) {
         method: options.method || 'GET',
         headers: {
             'Content-Type': 'application/json',
-            ...(options.token ? { Authorization: `****** } : {}),
+            ...(options.token ? { Authorization: `Bearer ${options.token}` } : {}),
             ...(options.headers || {}),
         },
         body: options.body ? JSON.stringify(options.body) : undefined,

@@ -997,6 +997,7 @@ namespace AirCanvas.Server
         private static bool _isPenInContact = false;
         private static bool _lastToolWasEraser = false;
         private static Point _lastInjectedPoint = new Point(0, 0);
+        private static long _lastMoveTicksMs = 0;
 
         /// <summary>
         /// Triggers the PC software tool shortcut ('E' for Eraser, 'B' for Brush/Pen)
@@ -1079,15 +1080,25 @@ namespace AirCanvas.Server
                 eventType = "pointerDown";
             }
 
-            // Detect large unexpected jump during pointerMove (>35% of screen) and break stroke cleanly
+            // Detect unexpected teleport jump during pointerMove (>35% of screen AND >160ms gap) and break stroke cleanly
+            long nowMoveTicksMs = DateTime.UtcNow.Ticks / 10000;
+            long dtMoveMs = _lastMoveTicksMs > 0 ? Math.Max(1, nowMoveTicksMs - _lastMoveTicksMs) : 16;
             if (eventType == "pointerMove" && _isPenInContact)
             {
                 double dist = Math.Sqrt(Math.Pow(target.X - _lastInjectedPoint.X, 2) + Math.Pow(target.Y - _lastInjectedPoint.Y, 2));
                 double maxJump = Math.Max(activeBounds.Width, activeBounds.Height) * 0.35;
-                if (dist > maxJump)
+                if (dtMoveMs > 160 && dist > maxJump)
                 {
                     eventType = "pointerDown";
                 }
+            }
+            if (eventType == "pointerDown" || eventType == "pointerMove")
+            {
+                _lastMoveTicksMs = nowMoveTicksMs;
+            }
+            else if (eventType == "pointerUp")
+            {
+                _lastMoveTicksMs = 0;
             }
 
             // 1. Try Windows Synthetic Pen API if initialized
@@ -1251,6 +1262,8 @@ namespace AirCanvas.Server
 
             int absX = (int)Math.Round(((double)(target.X - TargetScreen.VirtualLeft) * 65535.0) / vW, MidpointRounding.AwayFromZero);
             int absY = (int)Math.Round(((double)(target.Y - TargetScreen.VirtualTop) * 65535.0) / vH, MidpointRounding.AwayFromZero);
+            absX = Math.Max(0, Math.Min(65535, absX));
+            absY = Math.Max(0, Math.Min(65535, absY));
 
             if (posSuccess)
             {
@@ -1511,10 +1524,19 @@ namespace AirCanvas.Server
         public static readonly List<NetworkStream> _remoteTabletStreams = new List<NetworkStream>();
         public static string LastConnectedTabletEndpoint = "";
         public static long TotalPacketsReceived = 0;
-        public static readonly object _clientsLock = new object();
+        private const int MAX_CONCURRENT_SOCKETS = 64;
+        private const int MAX_WS_CLIENTS = 32;
+        private static int _openSocketCount = 0;
+        private static readonly object _clientsLock = new object();
         private static readonly object _dedupLock = new object();
         private static readonly Dictionary<string, long> _recentEventSignatures = new Dictionary<string, long>();
         private static long _lastDedupCleanupMs = 0;
+
+        private static string EscapeJsonValue(string val)
+        {
+            if (string.IsNullOrEmpty(val)) return "";
+            return val.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\r", "").Replace("\n", "");
+        }
 
         private static bool IsDuplicateEventSignature(string sig, long windowMs)
         {
@@ -1928,13 +1950,15 @@ namespace AirCanvas.Server
                             {
                                 TotalPacketsReceived++;
                                 string json = Encoding.UTF8.GetString(payload);
-                                if (json.Contains("\"peer_connected\"") ||
-                                    json.Contains("\"connect_request\"") ||
-                                    json.Contains("\"pointerDown\"") ||
-                                    json.Contains("\"pointerMove\"") ||
-                                    json.Contains("\"input_event\"") ||
-                                    json.Contains("\"workArea\"") ||
-                                    (json.Contains("\"room_joined\"") && !json.Contains("\"peerCount\":1,")))
+                                string msgType = ExtractJsonString(json, "type", "");
+                                if (msgType == "peer_connected" ||
+                                    msgType == "connect_request" ||
+                                    msgType == "pointerDown" ||
+                                    msgType == "pointerMove" ||
+                                    msgType == "input_event" ||
+                                    msgType == "workArea" ||
+                                    msgType == "working_area" ||
+                                    (msgType == "room_joined" && !json.Contains("\"peerCount\":1,")))
                                 {
                                     if (!CloudTabletConnected)
                                     {
@@ -1944,26 +1968,31 @@ namespace AirCanvas.Server
                                         Console.WriteLine("[CLOUD AUTO-BRIDGE] Android Tablet Paired via PIN " + pin + " (" + relayHost + ")");
                                         Console.ResetColor();
                                     }
-                                    if (json.Contains("\"connect_request\"") || json.Contains("\"peer_connected\""))
+                                    if (msgType == "connect_request" || msgType == "peer_connected")
                                     {
                                         long nowTs = DateTime.UtcNow.Ticks / 10000;
+                                        ScreenBounds resolvedCloudWork = ResolveSoftwareWorkingBounds(TargetScreen);
+                                        int cActiveW = Math.Max(64, resolvedCloudWork.Width);
+                                        int cActiveH = Math.Max(64, resolvedCloudWork.Height);
+                                        string cPresetId = EscapeJsonValue(ActiveWorkArea.PresetId ?? "auto");
                                         SendMaskedClientWsText(ssl, "{\"type\":\"connect_accept\",\"senderMode\":\"server\",\"pin\":\"" + pin + "\",\"timestamp\":" + nowTs + "}");
                                         SendMaskedClientWsText(ssl, "{\"type\":\"screen_sync\",\"screenWidth\":" + screenW + ",\"screenHeight\":" + screenH + ",\"timestamp\":" + nowTs + "}");
+                                        SendMaskedClientWsText(ssl, "{\"type\":\"workingAreaDetected\",\"workLeft\":" + resolvedCloudWork.Left + ",\"workTop\":" + resolvedCloudWork.Top + ",\"workWidth\":" + cActiveW + ",\"workHeight\":" + cActiveH + ",\"screenWidth\":" + screenW + ",\"screenHeight\":" + screenH + ",\"appName\":\"" + cPresetId + "\",\"targetMode\":\"CANVAS\",\"targetAvailable\":true,\"canvasVerified\":true,\"requiresCalibration\":false}");
                                     }
                                 }
-                                else if (json.Contains("\"peer_disconnected\"") && json.Contains("\"peerCount\":1"))
+                                else if (msgType == "peer_disconnected" && json.Contains("\"peerCount\":1"))
                                 {
                                     CloudTabletConnected = false;
                                     ReleaseStuckPointerOnDisconnect();
                                 }
 
-                                if (json.Contains("\"ping\""))
+                                if (msgType == "ping")
                                 {
                                     long pingTs = (long)ExtractJsonDouble(json, "timestamp", 0);
                                     long nowTs = pingTs > 0 ? pingTs : (DateTime.UtcNow.Ticks / 10000);
                                     SendMaskedClientWsText(ssl, "{\"type\":\"pong\",\"timestamp\":" + nowTs + "}");
                                 }
-                                else if (!json.Contains("\"pong\""))
+                                else if (msgType != "pong")
                                 {
                                     ProcessJsonPacket(json, null);
                                     BroadcastWsTextMessage(json, null);
@@ -2088,6 +2117,12 @@ namespace AirCanvas.Server
                         try
                         {
                             TcpClient client = _tcpListener.AcceptTcpClient();
+                            if (Interlocked.Increment(ref _openSocketCount) > MAX_CONCURRENT_SOCKETS)
+                            {
+                                Interlocked.Decrement(ref _openSocketCount);
+                                try { client.Close(); } catch { }
+                                continue;
+                            }
                             Thread clientThread = new Thread(() => HandleClient(client));
                             clientThread.IsBackground = true;
                             clientThread.Start();
@@ -2264,6 +2299,7 @@ namespace AirCanvas.Server
             try
             {
                 client.NoDelay = true;
+                client.SendTimeout = 2000;
                 stream = client.GetStream();
 
                 string request = ReadHttpHeader(stream);
@@ -2276,12 +2312,14 @@ namespace AirCanvas.Server
                         string primaryIp = GetPrimaryLocalIp();
                         string allIpsJson = GetAllLocalIpsJsonArray();
                         int tablets = GetConnectedTabletCount();
-                        string json = "{\"ip\":\"" + primaryIp + "\",\"allIps\":" + allIpsJson + ",\"webPort\":3005,\"serverPort\":" + DEFAULT_PORT + ",\"pin\":\"1234\",\"connectedTablets\":" + tablets + ",\"version\":\"" + VERSION + "\"}";
+                        string json = "{\"ip\":\"" + EscapeJsonValue(primaryIp) + "\",\"allIps\":" + allIpsJson + ",\"webPort\":3005,\"serverPort\":" + DEFAULT_PORT + ",\"pin\":\"" + EscapeJsonValue(ActivePairingPin) + "\",\"connectedTablets\":" + tablets + ",\"version\":\"" + EscapeJsonValue(VERSION) + "\"}";
                         byte[] jsonBytes = Encoding.UTF8.GetBytes(json);
                         string jsonHeader = "HTTP/1.1 200 OK\r\n" +
                                             "Connection: close\r\n" +
                                             "Content-Type: application/json; charset=utf-8\r\n" +
                                             "Content-Length: " + jsonBytes.Length + "\r\n" +
+                                            "Cache-Control: no-store\r\n" +
+                                            "X-Content-Type-Options: nosniff\r\n" +
                                             "Access-Control-Allow-Origin: *\r\n\r\n";
                         byte[] hBytes = Encoding.UTF8.GetBytes(jsonHeader);
                         stream.Write(hBytes, 0, hBytes.Length);
@@ -2289,7 +2327,7 @@ namespace AirCanvas.Server
                         return;
                     }
 
-                    string httpResp = "HTTP/1.1 200 OK\r\nConnection: close\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: text/plain\r\n\r\nAirCanvas Windows Server v" + VERSION + " is ACTIVE on port " + DEFAULT_PORT + " (IP: " + GetPrimaryLocalIp() + ").\n";
+                    string httpResp = "HTTP/1.1 200 OK\r\nConnection: close\r\nX-Content-Type-Options: nosniff\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: text/plain\r\n\r\nAirCanvas Windows Server v" + VERSION + " is ACTIVE on port " + DEFAULT_PORT + " (IP: " + GetPrimaryLocalIp() + ").\n";
                     byte[] respBytes = Encoding.UTF8.GetBytes(httpResp);
                     stream.Write(respBytes, 0, respBytes.Length);
                     return;
@@ -2300,6 +2338,7 @@ namespace AirCanvas.Server
             catch { }
             finally
             {
+                Interlocked.Decrement(ref _openSocketCount);
                 try { client.Close(); } catch { }
             }
         }
@@ -2331,9 +2370,43 @@ namespace AirCanvas.Server
 
                 if (string.IsNullOrEmpty(key)) return;
 
-                string magic = key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
-                byte[] hash = SHA1.Create().ComputeHash(Encoding.UTF8.GetBytes(magic));
-                string acceptKey = Convert.ToBase64String(hash);
+                string acceptKey;
+                using (SHA1 sha1 = SHA1.Create())
+                {
+                    string magic = key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+                    byte[] hash = sha1.ComputeHash(Encoding.UTF8.GetBytes(magic));
+                    acceptKey = Convert.ToBase64String(hash);
+                }
+
+                bool capacityExceeded = false;
+                int tabletCount = 0;
+                lock (_clientsLock)
+                {
+                    if (_activeClients.Count >= MAX_WS_CLIENTS)
+                    {
+                        capacityExceeded = true;
+                    }
+                    else
+                    {
+                        _activeClients.Add(stream);
+                        addedToActiveClients = true;
+                        if (isRemoteTablet)
+                        {
+                            _remoteTabletStreams.Add(stream);
+                            LastConnectedTabletEndpoint = remoteEndpointStr;
+                        }
+                        tabletCount = _remoteTabletStreams.Count;
+                    }
+                }
+
+                if (capacityExceeded)
+                {
+                    byte[] busyBytes = Encoding.ASCII.GetBytes("HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 19\r\n\r\nToo many WS clients");
+                    stream.Write(busyBytes, 0, busyBytes.Length);
+                    return;
+                }
+
+                try { client.SendTimeout = 2000; stream.WriteTimeout = 2000; } catch { }
 
                 string response = "HTTP/1.1 101 Switching Protocols\r\n" +
                                   "Upgrade: websocket\r\n" +
@@ -2341,19 +2414,6 @@ namespace AirCanvas.Server
                                   "Sec-WebSocket-Accept: " + acceptKey + "\r\n\r\n";
                 byte[] responseBytes = Encoding.UTF8.GetBytes(response);
                 stream.Write(responseBytes, 0, responseBytes.Length);
-
-                int tabletCount = 0;
-                lock (_clientsLock)
-                {
-                    _activeClients.Add(stream);
-                    addedToActiveClients = true;
-                    if (isRemoteTablet)
-                    {
-                        _remoteTabletStreams.Add(stream);
-                        LastConnectedTabletEndpoint = remoteEndpointStr;
-                    }
-                    tabletCount = _remoteTabletStreams.Count;
-                }
 
                 long joinTime = DateTime.UtcNow.Ticks / 10000;
                 int peerCountForMsg = isRemoteTablet ? (tabletCount + 1) : (tabletCount > 0 ? tabletCount + 1 : 1);
@@ -2365,23 +2425,23 @@ namespace AirCanvas.Server
                     Console.ResetColor();
                 }
 
-                SendWsTextMessage(stream, "{\"type\":\"room_joined\",\"role\":\"" + (isRemoteTablet ? "client" : "server") + "\",\"peerCount\":" + peerCountForMsg + ",\"version\":\"" + VERSION + "\",\"timestamp\":" + joinTime + "}");
+                SendWsTextMessage(stream, "{\"type\":\"room_joined\",\"role\":\"" + (isRemoteTablet ? "client" : "server") + "\",\"peerCount\":" + peerCountForMsg + ",\"version\":\"" + EscapeJsonValue(VERSION) + "\",\"timestamp\":" + joinTime + "}");
                 int screenW = Math.Max(64, TargetScreen.Width);
                 int screenH = Math.Max(64, TargetScreen.Height);
                 ScreenBounds resolvedWork = ResolveSoftwareWorkingBounds(TargetScreen);
                 int activeW = Math.Max(64, resolvedWork.Width);
                 int activeH = Math.Max(64, resolvedWork.Height);
-                string presetId = (ActiveWorkArea.PresetId ?? "auto");
-                SendWsTextMessage(stream, "{\"type\":\"workingAreaDetected\",\"workLeft\":" + resolvedWork.Left + ",\"workTop\":" + resolvedWork.Top + ",\"workWidth\":" + activeW + ",\"workHeight\":" + activeH + ",\"screenWidth\":" + screenW + ",\"screenHeight\":" + screenH + ",\"appName\":\"" + presetId + "\",\"targetMode\":\"CANVAS\",\"targetAvailable\":true,\"canvasVerified\":true,\"requiresCalibration\":false}");
+                string presetId = EscapeJsonValue(ActiveWorkArea.PresetId ?? "auto");
                 SendWsTextMessage(stream, "{\"type\":\"screen_sync\",\"screenWidth\":" + screenW + ",\"screenHeight\":" + screenH + ",\"timestamp\":" + joinTime + "}");
+                SendWsTextMessage(stream, "{\"type\":\"workingAreaDetected\",\"workLeft\":" + resolvedWork.Left + ",\"workTop\":" + resolvedWork.Top + ",\"workWidth\":" + activeW + ",\"workHeight\":" + activeH + ",\"screenWidth\":" + screenW + ",\"screenHeight\":" + screenH + ",\"appName\":\"" + presetId + "\",\"targetMode\":\"CANVAS\",\"targetAvailable\":true,\"canvasVerified\":true,\"requiresCalibration\":false}");
 
                 if (isRemoteTablet)
                 {
-                    BroadcastWsTextMessage("{\"type\":\"peer_connected\",\"role\":\"client\",\"deviceName\":\"Android / Mobile Tablet (" + remoteEndpointStr + ")\",\"transportType\":\"wifi\",\"peerCount\":" + peerCountForMsg + ",\"timestamp\":" + joinTime + "}", stream);
+                    BroadcastWsTextMessage("{\"type\":\"peer_connected\",\"role\":\"client\",\"deviceName\":\"Android / Mobile Tablet (" + EscapeJsonValue(remoteEndpointStr) + ")\",\"transportType\":\"wifi\",\"peerCount\":" + peerCountForMsg + ",\"timestamp\":" + joinTime + "}", stream);
                 }
                 else if (tabletCount > 0)
                 {
-                    SendWsTextMessage(stream, "{\"type\":\"peer_connected\",\"role\":\"client\",\"deviceName\":\"Android / Mobile Tablet (" + LastConnectedTabletEndpoint + ")\",\"transportType\":\"wifi\",\"peerCount\":" + peerCountForMsg + ",\"timestamp\":" + joinTime + "}");
+                    SendWsTextMessage(stream, "{\"type\":\"peer_connected\",\"role\":\"client\",\"deviceName\":\"Android / Mobile Tablet (" + EscapeJsonValue(LastConnectedTabletEndpoint) + ")\",\"transportType\":\"wifi\",\"peerCount\":" + peerCountForMsg + ",\"timestamp\":" + joinTime + "}");
                 }
 
                 while (_isRunning && client.Connected)
@@ -2505,7 +2565,9 @@ namespace AirCanvas.Server
         {
             try
             {
-                if (json.Contains("\"ping\""))
+                string type = ExtractJsonString(json, "type", "pointerMove");
+
+                if (type == "ping")
                 {
                     long pingTs = (long)ExtractJsonDouble(json, "timestamp", 0);
                     long now = pingTs > 0 ? pingTs : (DateTime.UtcNow.Ticks / 10000);
@@ -2513,7 +2575,10 @@ namespace AirCanvas.Server
                     return;
                 }
 
-                string type = ExtractJsonString(json, "type", "pointerMove");
+                if (type == "pong")
+                {
+                    return;
+                }
 
                 if (type == "discovery_ping")
                 {
@@ -2534,8 +2599,13 @@ namespace AirCanvas.Server
                         long nowTs = DateTime.UtcNow.Ticks / 10000;
                         int sw = Math.Max(64, TargetScreen != null ? TargetScreen.Width : 1920);
                         int sh = Math.Max(64, TargetScreen != null ? TargetScreen.Height : 1080);
+                        ScreenBounds resolvedReqWork = ResolveSoftwareWorkingBounds(TargetScreen);
+                        int rActiveW = Math.Max(64, resolvedReqWork.Width);
+                        int rActiveH = Math.Max(64, resolvedReqWork.Height);
+                        string rPresetId = EscapeJsonValue(ActiveWorkArea.PresetId ?? "auto");
                         SendWsTextMessage(stream, "{\"type\":\"connect_accept\",\"senderMode\":\"server\",\"pin\":\"" + ActivePairingPin + "\",\"timestamp\":" + nowTs + "}");
                         SendWsTextMessage(stream, "{\"type\":\"screen_sync\",\"screenWidth\":" + sw + ",\"screenHeight\":" + sh + ",\"timestamp\":" + nowTs + "}");
+                        SendWsTextMessage(stream, "{\"type\":\"workingAreaDetected\",\"workLeft\":" + resolvedReqWork.Left + ",\"workTop\":" + resolvedReqWork.Top + ",\"workWidth\":" + rActiveW + ",\"workHeight\":" + rActiveH + ",\"screenWidth\":" + sw + ",\"screenHeight\":" + sh + ",\"appName\":\"" + rPresetId + "\",\"targetMode\":\"CANVAS\",\"targetAvailable\":true,\"canvasVerified\":true,\"requiresCalibration\":false}");
                     }
                     return;
                 }
@@ -2724,6 +2794,24 @@ namespace AirCanvas.Server
             catch { }
         }
 
+        private static void PruneDeadStreams(List<NetworkStream> deadStreams)
+        {
+            if (deadStreams == null || deadStreams.Count == 0) return;
+            lock (_clientsLock)
+            {
+                for (int i = 0; i < deadStreams.Count; i++)
+                {
+                    NetworkStream dead = deadStreams[i];
+                    _activeClients.Remove(dead);
+                    _remoteTabletStreams.Remove(dead);
+                }
+            }
+            for (int i = 0; i < deadStreams.Count; i++)
+            {
+                try { deadStreams[i].Close(); } catch { }
+            }
+        }
+
         public static void BroadcastWsTextMessage(string text, NetworkStream senderStream)
         {
             try
@@ -2731,21 +2819,35 @@ namespace AirCanvas.Server
                 byte[] frame = BuildWsTextFrame(text);
                 if (frame == null) return;
 
+                List<NetworkStream> snapshot = new List<NetworkStream>();
                 lock (_clientsLock)
                 {
-                    foreach (var client in _activeClients)
+                    for (int i = 0; i < _activeClients.Count; i++)
                     {
-                        if (client != senderStream)
+                        NetworkStream client = _activeClients[i];
+                        if (client != null && client != senderStream)
                         {
-                            try
-                            {
-                                client.Write(frame, 0, frame.Length);
-                                client.Flush();
-                            }
-                            catch { }
+                            snapshot.Add(client);
                         }
                     }
                 }
+
+                List<NetworkStream> deadStreams = null;
+                for (int i = 0; i < snapshot.Count; i++)
+                {
+                    NetworkStream client = snapshot[i];
+                    try
+                    {
+                        client.Write(frame, 0, frame.Length);
+                        client.Flush();
+                    }
+                    catch
+                    {
+                        if (deadStreams == null) deadStreams = new List<NetworkStream>();
+                        deadStreams.Add(client);
+                    }
+                }
+                PruneDeadStreams(deadStreams);
             }
             catch { }
         }
@@ -2757,21 +2859,35 @@ namespace AirCanvas.Server
                 byte[] frame = BuildWsBinaryFrame(payload);
                 if (frame == null) return;
 
+                List<NetworkStream> snapshot = new List<NetworkStream>();
                 lock (_clientsLock)
                 {
-                    foreach (var client in _activeClients)
+                    for (int i = 0; i < _activeClients.Count; i++)
                     {
-                        if (client != senderStream)
+                        NetworkStream client = _activeClients[i];
+                        if (client != null && client != senderStream)
                         {
-                            try
-                            {
-                                client.Write(frame, 0, frame.Length);
-                                client.Flush();
-                            }
-                            catch { }
+                            snapshot.Add(client);
                         }
                     }
                 }
+
+                List<NetworkStream> deadStreams = null;
+                for (int i = 0; i < snapshot.Count; i++)
+                {
+                    NetworkStream client = snapshot[i];
+                    try
+                    {
+                        client.Write(frame, 0, frame.Length);
+                        client.Flush();
+                    }
+                    catch
+                    {
+                        if (deadStreams == null) deadStreams = new List<NetworkStream>();
+                        deadStreams.Add(client);
+                    }
+                }
+                PruneDeadStreams(deadStreams);
             }
             catch { }
         }
@@ -3053,6 +3169,17 @@ namespace AirCanvas.Server
             IsCloudRelayConnected = false;
             CloudTabletConnected = false;
             try { ReleaseStuckPointerOnDisconnect(); } catch { }
+            List<NetworkStream> toClose = new List<NetworkStream>();
+            lock (_clientsLock)
+            {
+                for (int i = 0; i < _activeClients.Count; i++) toClose.Add(_activeClients[i]);
+                _activeClients.Clear();
+                _remoteTabletStreams.Clear();
+            }
+            for (int i = 0; i < toClose.Count; i++)
+            {
+                try { if (toClose[i] != null) toClose[i].Close(); } catch { }
+            }
             try { if (_tcpListener != null) _tcpListener.Stop(); } catch { }
             try { if (_udpListener != null) _udpListener.Close(); } catch { }
         }
