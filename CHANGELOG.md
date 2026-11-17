@@ -4,6 +4,18 @@ All notable changes to **Air Canvas** are documented in this file.
 
 ---
 
+## [2.1.4] — 2026-11-17
+
+### Fixed & Verified
+- **Dual-Device Startup Sync, Watchdog & Offline Reconnect**:
+  - Host `startServer` now emits initial `screen_sync`, replays active `software_sync` working areas (`lastSoftwareSync`), and starts the heartbeat/pong stall watchdog on socket open; `peer_connected` also replays `lastSoftwareSync` to late-joining mobile peers.
+  - Reset `isSimulatedOffline = false` at the start of `connectToServer`, added `safeCloseSocket` teardown guards to prevent close-before-open unhandled socket errors, prevented `connectLocalHostBridge` from double-connecting to `window.location.port`, and ensured `ensureSocketStreaming` respects `mode === 'server'`.
+- **Drawing Engine Undo/Redo & Live Dual-Device QA**:
+  - Cleared `redoStack` on remote `pointerDown` / orphan `pointerMove` stroke starts and reset dangling `currentStroke` / `currentRemoteStroke` / `activePointerId` references inside `undo()` and `redo()`.
+  - Added **QA 3** in `tests/e2e_drawing_and_connection_qa.mjs` testing two independent production `ConnectionManager` + `DrawingEngine` instances paired over the live `/ws` relay (handshake, screen/software sync, brush sync, diagonal/circle/cursive/eraser strokes, undo/redo/clear, and offline-recovery).
+
+---
+
 ## [2.1.3] — 2026-11-13
 
 ### Fixed & Hardened

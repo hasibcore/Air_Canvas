@@ -27,28 +27,38 @@ process.on('exit', () => {
   } catch {}
 });
 
-function emitTsModule(relSrcPath) {
-  const absIn = path.join(ROOT_DIR, 'src', relSrcPath);
-  const absOut = path.join(tmpSrcRoot, relSrcPath.replace(/\.ts$/, '.mjs'));
-  fs.mkdirSync(path.dirname(absOut), { recursive: true });
-  let code = fs.readFileSync(absIn, 'utf8');
-  code = code.replace(/(from\s+['"][^'"]+)\.ts(['"])/g, '$1.mjs$2');
-  const transpiled = ts.transpileModule(code, {
-    compilerOptions: {
-      module: ts.ModuleKind.ES2022,
-      target: ts.ScriptTarget.ES2022,
-    },
-  }).outputText;
-  fs.writeFileSync(absOut, transpiled, 'utf8');
-  return pathToFileURL(absOut).href;
+function emitTsTree(subdir = '.') {
+  const files = [
+    'types/index.ts',
+    'services/oneEuroFilter.ts',
+    'services/pressureCurves.ts',
+    'services/targetGeometryManager.ts',
+    'services/drawingEngine.ts',
+    'services/connectionManager.ts',
+  ];
+  const urls = {};
+  for (const relSrcPath of files) {
+    const absIn = path.join(ROOT_DIR, 'src', relSrcPath);
+    const absOut = path.join(tmpSrcRoot, subdir, relSrcPath.replace(/\.ts$/, '.mjs'));
+    fs.mkdirSync(path.dirname(absOut), { recursive: true });
+    let code = fs.readFileSync(absIn, 'utf8');
+    code = code.replace(/(from\s+['"][^'"]+)\.ts(['"])/g, '$1.mjs$2');
+    const transpiled = ts.transpileModule(code, {
+      compilerOptions: {
+        module: ts.ModuleKind.ES2022,
+        target: ts.ScriptTarget.ES2022,
+      },
+    }).outputText;
+    fs.writeFileSync(absOut, transpiled, 'utf8');
+    urls[relSrcPath] = pathToFileURL(absOut).href;
+  }
+  return urls;
 }
 
-emitTsModule('types/index.ts');
-emitTsModule('services/oneEuroFilter.ts');
-emitTsModule('services/pressureCurves.ts');
-const tgmUrl = emitTsModule('services/targetGeometryManager.ts');
-const drawingEngineUrl = emitTsModule('services/drawingEngine.ts');
-const connMgrUrl = emitTsModule('services/connectionManager.ts');
+const baseUrls = emitTsTree('.');
+const tgmUrl = baseUrls['services/targetGeometryManager.ts'];
+const drawingEngineUrl = baseUrls['services/drawingEngine.ts'];
+const connMgrUrl = baseUrls['services/connectionManager.ts'];
 
 // Minimal localStorage stub so DrawingEngine singleton loads cleanly in Node
 const memStore = new Map();
@@ -498,6 +508,211 @@ console.log('\n--- QA 2: TEST A (Lines, Diagonals, Circle, Square, Curves, Handw
   console.log(
     `  [PASS] TEST A & Reconnect: Straight lines, diagonal, closed square, 64-pt 1-Euro circle (diamX=${diamX}px, diamY=${diamY}px, ratio=${aspectRatio.toFixed(3)}), smooth sine curve, continuous handwriting, orphan pointerMove isolation, & reconnect recovery passed.`
   );
+}
+
+// ------------------------------------------------------------------------------
+// 3. Full Paired Production Modules: Dual (ConnectionManager + DrawingEngine)
+//    Exercises exact App.tsx wiring across live port-3000 /ws relay
+// ------------------------------------------------------------------------------
+console.log('\n--- QA 3: Full Dual Production Pair (PC Host ConnectionManager+DrawingEngine <-> Mobile ConnectionManager+DrawingEngine) ---');
+{
+  const parsedHttp = new URL(TARGET_HTTP);
+  const prevWebSocket = globalThis.WebSocket;
+  const prevWindow = globalThis.window;
+  const prevKeyboardEvent = globalThis.KeyboardEvent;
+
+  globalThis.WebSocket = WebSocket;
+  globalThis.window = {
+    location: {
+      protocol: parsedHttp.protocol,
+      host: parsedHttp.host,
+      hostname: parsedHttp.hostname,
+      port: parsedHttp.port || (parsedHttp.protocol === 'https:' ? '443' : '80'),
+      origin: parsedHttp.origin,
+    },
+    innerWidth: 1920,
+    innerHeight: 1080,
+    screen: { width: 1920, height: 1080 },
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    dispatchEvent: () => true,
+  };
+  globalThis.KeyboardEvent = class KeyboardEvent {
+    constructor(type, init = {}) {
+      this.type = type;
+      this.key = init.key || '';
+      this.code = init.code || '';
+    }
+  };
+
+  const pcUrls = emitTsTree('pc');
+  const mobUrls = emitTsTree('mobile');
+  const { ConnectionManager: PcConnMgr } = await import(pcUrls['services/connectionManager.ts']);
+  const { DrawingEngine: PcDrawEngine } = await import(pcUrls['services/drawingEngine.ts']);
+  const { ConnectionManager: MobConnMgr } = await import(mobUrls['services/connectionManager.ts']);
+  const { DrawingEngine: MobDrawEngine } = await import(mobUrls['services/drawingEngine.ts']);
+
+  const pcConn = PcConnMgr.getInstance();
+  const pcEngine = PcDrawEngine.getInstance();
+  const mobConn = MobConnMgr.getInstance();
+  const mobEngine = MobDrawEngine.getInstance();
+
+  function wireDevice(conn, engine) {
+    engine.onInputGenerated = (event) => conn.sendInputEvent(event);
+    conn.onInputReceived = (event) => engine.handleIncomingInputEvent(event);
+    conn.onBrushReceived = (brush) => engine.updateBrush(brush);
+    conn.onActionReceived = (action) => {
+      if (action === 'undo') engine.undo();
+      if (action === 'redo') engine.redo();
+      if (action === 'clear' || action === 'clearCanvas') engine.clearCanvas();
+      if (action === 'eraserShortcut') engine.updateBrush({ mode: 'eraser' });
+      if (action === 'brushShortcut' && engine.brushSettings.mode === 'eraser') {
+        engine.updateBrush({ mode: 'pen' });
+      }
+    };
+    conn.onScreenSyncReceived = (w, h) => engine.setPcScreenDimensions(w, h);
+    engine.onSoftwareProfileChanged = (profileId, workingArea) => conn.sendSoftwareSync(profileId, workingArea);
+    conn.onSoftwareSyncReceived = (profileId, workingArea) => engine.setSoftwareProfile(profileId, workingArea, false);
+  }
+
+  try {
+    wireDevice(pcConn, pcEngine);
+    wireDevice(mobConn, mobEngine);
+
+    pcEngine.updateCanvasDimensions(1920, 1080);
+    pcEngine.setPcScreenDimensions(1920, 1080);
+    pcEngine.precisionMode = 'proAdaptive';
+    mobEngine.updateCanvasDimensions(1080, 1920);
+    mobEngine.precisionMode = 'proAdaptive';
+
+    const qa3Pin = '5599';
+    let screenSyncedOnMobile = false;
+    let softwareSyncedOnMobile = false;
+    const origScreenCb = mobConn.onScreenSyncReceived;
+    mobConn.onScreenSyncReceived = (w, h) => {
+      origScreenCb?.(w, h);
+      if (w === 1920 && h === 1080) screenSyncedOnMobile = true;
+    };
+    const origSoftCb = mobConn.onSoftwareSyncReceived;
+    mobConn.onSoftwareSyncReceived = (id, area) => {
+      origSoftCb?.(id, area);
+      if (id === 'photoshop') softwareSyncedOnMobile = true;
+    };
+
+    // Start PC Host and set software profile BEFORE Mobile joins (verifies startup/peer_connected replay fix)
+    pcConn.serverConfig.screenWidth = 1920;
+    pcConn.serverConfig.screenHeight = 1080;
+    pcEngine.setSoftwareProfile('photoshop', undefined, true);
+    pcConn.startServer(qa3Pin, '127.0.0.1', Number(globalThis.window.location.port));
+
+    await waitFor(() => pcConn.relayState === 'connected', 3000, 'PC Host WebSocket relay ready');
+
+    // Connect Mobile Pad via live /ws relay
+    const connected = await mobConn.connectToServer('relay', Number(globalThis.window.location.port), qa3Pin, 'cloud');
+    assert.equal(connected, true, 'Mobile ConnectionManager.connectToServer must succeed');
+    assert.equal(mobConn.state, 'connected');
+    assert.equal(pcConn.state, 'connected');
+
+    await waitFor(
+      () => screenSyncedOnMobile && softwareSyncedOnMobile,
+      4000,
+      'Mobile receives PC screen_sync (1920x1080) and software_sync (photoshop) on peer_connected'
+    );
+    assert.equal(mobEngine.pcScreenWidth, 1920);
+    assert.equal(mobEngine.pcScreenHeight, 1080);
+    assert.equal(mobEngine.activeSoftwareId, 'photoshop');
+
+    // 1. Mobile changes brush color & width -> PC Engine reflects synced brush
+    mobEngine.updateBrush({ mode: 'pen', color: '#FF3B30', baseWidth: 14 });
+    mobConn.sendBrushUpdate({ mode: 'pen', color: '#FF3B30', baseWidth: 14 });
+    await waitFor(
+      () => pcEngine.brushSettings.color === '#FF3B30' && pcEngine.brushSettings.baseWidth === 14,
+      3000,
+      'PC receives Mobile brush update'
+    );
+
+    // 2. Mobile draws diagonal line + 40-point smooth circle + sine wave + cursive stroke
+    // Diagonal
+    mobEngine.onPointerDown(100, 200, 0.75, 'stylus', 1);
+    for (let i = 1; i <= 8; i++) {
+      mobEngine.onPointerMove(100 + i * 100, 200 + i * 120, 0.75, 'stylus', 1);
+    }
+    mobEngine.onPointerUp('stylus', 1, 0, 900, 1160);
+
+    // Circle (on 1080x1920 mobile surface -> mapped to 1920x1080 PC normalized canvas)
+    const cx = 540;
+    const cy = 960;
+    const r = 300;
+    mobEngine.onPointerDown(cx + r, cy, 0.8, 'stylus', 2);
+    for (let i = 1; i < 40; i++) {
+      const th = (2 * Math.PI * i) / 40;
+      mobEngine.onPointerMove(cx + r * Math.cos(th), cy + r * Math.sin(th), 0.8, 'stylus', 2);
+    }
+    mobEngine.onPointerUp('stylus', 2, 0, cx + r, cy);
+
+    // Handwriting cursive glyph
+    const hw = [
+      [200, 1400], [260, 1280], [320, 1400], [380, 1300], [440, 1400],
+    ];
+    mobEngine.onPointerDown(hw[0][0], hw[0][1], 0.7, 'stylus', 3);
+    for (let i = 1; i < hw.length - 1; i++) {
+      mobEngine.onPointerMove(hw[i][0], hw[i][1], 0.7, 'stylus', 3);
+    }
+    mobEngine.onPointerUp('stylus', 3, 0, hw[hw.length - 1][0], hw[hw.length - 1][1]);
+
+    await waitFor(() => pcEngine.strokes.length === 3, 5000, 'PC receives all 3 Mobile strokes');
+    assert.equal(pcEngine.strokes[0].settings.color, '#FF3B30');
+    assert.equal(pcEngine.strokes[0].settings.baseWidth, 14);
+    assert.ok(pcEngine.strokes[1].points.length >= 35, 'Circle points must survive 1-Euro smoothing cleanly');
+
+    // Verify endpoints normalized fidelity on Stroke 0
+    const s0First = pcEngine.strokes[0].points[0];
+    const s0Last = pcEngine.strokes[0].points[pcEngine.strokes[0].points.length - 1];
+    assert.ok(Math.abs(s0First.normX - 100 / 1079) < 0.01);
+    assert.ok(Math.abs(s0Last.normX - 900 / 1079) < 0.03);
+
+    // 3. Mobile switches to Eraser and erases
+    mobEngine.updateBrush({ mode: 'eraser' });
+    mobConn.sendBrushUpdate({ mode: 'eraser' });
+    mobEngine.onPointerDown(540, 960, 0.9, 'eraser', 4);
+    mobEngine.onPointerMove(640, 960, 0.9, 'eraser', 4);
+    mobEngine.onPointerUp('eraser', 4, 0, 740, 960);
+    await waitFor(() => pcEngine.strokes.length === 4, 4000, 'PC receives Mobile eraser stroke');
+    assert.equal(pcEngine.strokes[3].settings.mode, 'eraser');
+
+    // 4. Mobile Undo / Redo / Clear actions sync to PC
+    mobEngine.undo();
+    mobConn.sendAction('undo');
+    await waitFor(() => pcEngine.strokes.length === 3, 3000, 'PC mirrors Mobile undo');
+
+    mobEngine.redo();
+    mobConn.sendAction('redo');
+    await waitFor(() => pcEngine.strokes.length === 4, 3000, 'PC mirrors Mobile redo');
+
+    mobEngine.clearCanvas();
+    mobConn.sendAction('clear');
+    await waitFor(() => pcEngine.strokes.length === 0, 3000, 'PC mirrors Mobile clear');
+
+    // 5. Simulate Offline -> Reconnect recovery test (verifies isSimulatedOffline fix)
+    mobConn.simulateDisconnectedState('QA simulated drop');
+    assert.equal(mobConn.isSimulatedOffline, true);
+    const reconOk = await mobConn.connectToServer('relay', Number(globalThis.window.location.port), qa3Pin, 'cloud');
+    assert.equal(reconOk, true);
+    assert.equal(mobConn.isSimulatedOffline, false, 'isSimulatedOffline MUST reset on reconnect');
+
+    mobEngine.updateBrush({ mode: 'pen', color: '#10B981', baseWidth: 6 });
+    mobEngine.onPointerDown(540, 960, 0.7, 'stylus', 5);
+    mobEngine.onPointerUp('stylus', 5, 0, 640, 1060);
+    await waitFor(() => pcEngine.strokes.length === 1, 4000, 'PC receives stroke immediately after simulated offline recovery');
+
+    console.log('  [PASS] QA 3: Full Dual Production ConnectionManager + DrawingEngine pairing, sync, multi-shape/cursive/eraser drawing, undo/redo/clear, and offline-recovery verified cleanly.');
+  } finally {
+    try { mobConn.disconnect(false); } catch {}
+    try { pcConn.stopServer(); } catch {}
+    globalThis.WebSocket = prevWebSocket;
+    globalThis.window = prevWindow;
+    globalThis.KeyboardEvent = prevKeyboardEvent;
+  }
 }
 
 console.log('\n================================================================');

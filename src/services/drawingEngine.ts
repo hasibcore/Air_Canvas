@@ -1217,6 +1217,7 @@ export class DrawingEngine {
 
     if (event.type === 'pointerDown') {
       this.saveSnapshot();
+      this.redoStack = [];
       if (this.currentRemoteStroke) {
         this.strokes.push(this.currentRemoteStroke);
       }
@@ -1355,6 +1356,8 @@ export class DrawingEngine {
         );
 
         if (!this.currentRemoteStroke) {
+          this.saveSnapshot();
+          this.redoStack = [];
           this.currentRemoteStroke = {
             id: 'remote_' + Date.now() + '_' + Math.random().toString(36).substring(2, 6),
             points: [
@@ -1454,6 +1457,9 @@ export class DrawingEngine {
     if (this.undoStack.length > 0) {
       this.redoStack.push(JSON.parse(JSON.stringify(this.strokes)));
       this.strokes = this.undoStack.pop() || [];
+      this.currentStroke = null;
+      this.currentRemoteStroke = null;
+      this.activePointerId = null;
       this.notify();
     }
   }
@@ -1462,6 +1468,9 @@ export class DrawingEngine {
     if (this.redoStack.length > 0) {
       this.undoStack.push(JSON.parse(JSON.stringify(this.strokes)));
       this.strokes = this.redoStack.pop() || [];
+      this.currentStroke = null;
+      this.currentRemoteStroke = null;
+      this.activePointerId = null;
       this.notify();
     }
   }
